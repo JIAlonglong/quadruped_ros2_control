@@ -15,6 +15,8 @@ set(THIS_PACKAGE_INCLUDE_DEPENDS
         rclcpp_lifecycle
 )
 
+list(APPEND CMAKE_PREFIX_PATH "/opt/unitree_robotics")
+
 # find dependencies
 find_package(ament_cmake REQUIRED)
 find_package(backward_ros REQUIRED)

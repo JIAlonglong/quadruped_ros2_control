@@ -11,6 +11,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(control_input_msgs REQUIRED)
+list(APPEND CMAKE_PREFIX_PATH "/opt/unitree_robotics")
 find_package(unitree_sdk2 REQUIRED)
 
 include(GNUInstallDirs)
