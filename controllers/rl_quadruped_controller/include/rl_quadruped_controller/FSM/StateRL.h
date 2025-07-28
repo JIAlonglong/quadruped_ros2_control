@@ -94,6 +94,7 @@ struct ModelParams
     std::string framework;
     int decimation;
     int num_observations;
+    bool use_camera;
     std::vector<std::string> observations;
     std::vector<int> observations_history;
     double damping;
@@ -126,6 +127,7 @@ struct Observations
     torch::Tensor dof_pos;
     torch::Tensor dof_vel;
     torch::Tensor actions;
+    torch::Tensor depth_latent;
 };
 
 class StateRL final : public FSMState

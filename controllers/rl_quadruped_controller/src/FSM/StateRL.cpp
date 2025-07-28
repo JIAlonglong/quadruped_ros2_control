@@ -219,14 +219,28 @@ torch::Tensor StateRL::computeObservation()
         else if (observation == "actions")
         {
             obs_list.push_back(obs_.actions);
+        } 
+    }
+    // 若使用相机
+    if (params_.use_camera) {
+        obs_list.push_back(obs_.depth_latent);
+    }
+    torch::Tensor obs = cat(obs_list, 1);
+    
+    // 强制补全
+    if (obs.size(1) < params_.num_observations) {
+        int padding_size = params_.num_observations - obs.size(1);
+        torch::Tensor padding = torch::zeros({obs.size(0), padding_size}, obs.options());
+        obs = torch::cat({obs, padding}, 1);
+        // 警告只出现一次
+        static bool warning_printed = false;
+        if (!warning_printed) {
+            RCLCPP_WARN(rclcpp::get_logger("StateRL"), "obs size: %d, padding size: %d", obs.size(1), padding_size);
+            warning_printed = true;
         }
     }
 
-    const torch::Tensor obs = cat(obs_list, 1);
-
-    // std::cout << "Observation: " << obs << std::endl;
-    torch::Tensor clamped_obs = clamp(obs, -params_.clip_obs, params_.clip_obs);
-    return clamped_obs;
+    return clamp(obs, -params_.clip_obs, params_.clip_obs);
 }
 
 void StateRL::loadYaml(const std::string& config_path)
@@ -257,7 +271,7 @@ void StateRL::loadYaml(const std::string& config_path)
         params_.observations_history = ReadVectorFromYaml<int>(config["observations_history"]);
     }
     params_.decimation = config["decimation"].as<int>();
-    params_.num_observations = config["num_observations"].as<int>();
+    params_.num_observations = config["num_observations"].as<int>(); // 53或45
     params_.observations = ReadVectorFromYaml<std::string>(config["observations"]);
     params_.clip_obs = config["clip_obs"].as<double>();
     if (config["clip_actions_lower"].IsNull() && config["clip_actions_upper"].IsNull())
@@ -280,6 +294,8 @@ void StateRL::loadYaml(const std::string& config_path)
     params_.ang_vel_scale = config["ang_vel_scale"].as<double>();
     params_.dof_pos_scale = config["dof_pos_scale"].as<double>();
     params_.dof_vel_scale = config["dof_vel_scale"].as<double>();
+    // 是否使用相机
+    params_.use_camera = config["use_camera"].as<bool>(false);
     // params_.commands_scale = torch::tensor(ReadVectorFromYaml<double>(config["commands_scale"])).view({1, -1});
     params_.commands_scale = torch::tensor({params_.lin_vel_scale, params_.lin_vel_scale, params_.ang_vel_scale});
     params_.rl_kp = torch::tensor(ReadVectorFromYaml<double>(config["rl_kp"], params_.framework, rows, cols)).view({
@@ -324,16 +340,35 @@ torch::Tensor StateRL::forward()
     torch::autograd::GradMode::set_enabled(false);
     torch::Tensor clamped_obs = computeObservation();
     torch::Tensor actions;
+    if(params_.use_camera){
+        // 创建默认的depth_latent张量
+        torch::Tensor depth_latent = torch::zeros(
+            {clamped_obs.size(0), 32},  // 形状：[batch_size, 32]
+            clamped_obs.options()      // 使用与obs相同的设备和数据类型
+        );
 
-    if (!params_.observations_history.empty())
-    {
-        history_obs_buf_->insert(clamped_obs);
-        history_obs_ = history_obs_buf_->getObsVec(params_.observations_history);
-        actions = model_.forward({history_obs_}).toTensor();
-    }
-    else
-    {
-        actions = model_.forward({clamped_obs}).toTensor();
+        if (!params_.observations_history.empty())
+        {
+            history_obs_buf_->insert(clamped_obs);
+            history_obs_ = history_obs_buf_->getObsVec(params_.observations_history);
+            // 传入depth_latent张量
+            actions = model_.forward({history_obs_, depth_latent}).toTensor();
+        }
+        else
+        {
+            // 传入depth_latent张量
+            actions = model_.forward({clamped_obs, depth_latent}).toTensor();
+        }
+
+     }else {
+        // 无相机模式：不传入depth_latent
+        if (!params_.observations_history.empty()) {
+            history_obs_buf_->insert(clamped_obs);
+            history_obs_ = history_obs_buf_->getObsVec(params_.observations_history);
+            actions = model_.forward({history_obs_}).toTensor();  // 仅传入观测值
+        } else {
+            actions = model_.forward({clamped_obs}).toTensor();  // 仅传入观测值
+        }
     }
 
     if (params_.clip_actions_upper.numel() != 0 && params_.clip_actions_lower.numel() != 0)
