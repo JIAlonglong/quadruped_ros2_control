@@ -137,7 +137,7 @@ unitree_guide_controller:
 rl_quadruped_controller:
   ros__parameters:
     update_rate: 200  # Hz
-    robot_pkg: "go2_description"
+    robot_pkg: "depth_go2_description"
     model_folder: "extreme-parkour-common"
     joints:
       - FL_hip_joint

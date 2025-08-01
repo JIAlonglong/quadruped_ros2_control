@@ -4,7 +4,7 @@
 
 #include "RlQuadrupedController.h"
 
-namespace rl_quadruped_controller
+namespace depth_rl_quadruped_controller
 {
     using config_type = controller_interface::interface_configuration_type;
 
@@ -53,6 +53,7 @@ namespace rl_quadruped_controller
         {
             conf.names.push_back(foot_force_name_ + "/" += interface_type);
         }
+        // 增加深度相机interface
 
         return conf;
     }
@@ -275,4 +276,4 @@ namespace rl_quadruped_controller
 }
 
 #include "pluginlib/class_list_macros.hpp"
-PLUGINLIB_EXPORT_CLASS(rl_quadruped_controller::LeggedGymController, controller_interface::ControllerInterface);
+PLUGINLIB_EXPORT_CLASS(depth_rl_quadruped_controller::LeggedGymController, controller_interface::ControllerInterface);

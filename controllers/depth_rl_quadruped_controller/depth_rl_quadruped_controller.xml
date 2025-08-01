@@ -1,0 +1,9 @@
+<library path="depth_rl_quadruped_controller">
+    <class name="depth_rl_quadruped_controller/LeggedGymController"
+           type="depth_rl_quadruped_controller::LeggedGymController"
+           base_class_type="controller_interface::ControllerInterface">
+        <description>
+            Quadruped Controller used RL-model trained in Legged Gym with depth camera.
+        </description>
+    </class>
+</library>

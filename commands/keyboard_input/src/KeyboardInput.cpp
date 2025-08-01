@@ -14,7 +14,7 @@ KeyboardInput::KeyboardInput() : Node("keyboard_input_node") {
     new_tio_.c_lflag &= (~ICANON & ~ECHO);
     tcsetattr(STDIN_FILENO, TCSANOW, &new_tio_);
     RCLCPP_INFO(get_logger(), "Keyboard input node started.");
-    RCLCPP_INFO(get_logger(), "Press 1-0 to switch between different modes");
+    RCLCPP_INFO(get_logger(), "Press 1-10 to switch between different modes");
     RCLCPP_INFO(get_logger(), "Use W/S/A/D and I/K/J/L to move the robot.");
     RCLCPP_INFO(get_logger(), "Please input keys, press Ctrl+C to quit.");
 }

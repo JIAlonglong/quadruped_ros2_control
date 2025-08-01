@@ -1,0 +1,38 @@
+leg_pd_controller:
+  ros__parameters:
+    # 控制器类型（必须与注册的类名一致）
+    type: leg_pd_controller/LegPdController
+
+    # 机器人模型包名（用于查找URDF等资源，可选，根据控制器实现是否需要保留）
+    robot_pkg: "depth_go2_description"
+
+    # 控制的关节列表（必须与机器人模型中的关节名完全一致）
+    joints:
+      - FL_hip_joint
+      - FL_thigh_joint
+      - FL_calf_joint
+      - FR_hip_joint
+      - FR_thigh_joint
+      - FR_calf_joint
+      - RL_hip_joint
+      - RL_thigh_joint
+      - RL_calf_joint
+      - RR_hip_joint
+      - RR_thigh_joint
+      - RR_calf_joint
+
+    # 硬件接口定义（仅包含实际存在的硬件接口，而非控制器参数）
+    # 控制器说明：命令接口为effort，状态接口为position/velocity
+    command_interfaces:
+      - effort  # 仅保留力控接口（硬件实际支持的命令类型）
+    state_interfaces:
+      - position  # 位置状态接口（必须）
+      - velocity  # 速度状态接口（必须）
+
+    # PD控制器核心参数（必须设置，否则会因未初始化导致段错误）
+    # 每个关节的PD增益（若所有关节增益相同，可简化为单值；否则按关节顺序定义列表）
+    kp: 300.0  # 比例增益（示例值，需根据机器人调试调整）
+    kd: 10.0   # 微分增益（示例值，需根据机器人调试调整）
+
+    # 可选：控制输出限制（防止力矩过大损坏关节）
+    effort_limit: 100.0  # 最大输出力（单位：N·m，根据机器人参数调整）
