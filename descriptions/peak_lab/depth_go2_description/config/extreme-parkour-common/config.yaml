@@ -3,7 +3,7 @@ framework: "isaacgym"
 rows: 4
 cols: 3
 decimation: 4
-num_observations: 45
+num_observations: 53
 observations: [ "commands", "ang_vel", "gravity_vec",  "dof_pos", "dof_vel", "actions" ]
 observations_history:  [0,1,2,3,4,5,6,7,8,9]
 clip_obs: 100.0
@@ -39,3 +39,12 @@ torque_limits: [ 33.5, 33.5, 33.5,
                  33.5, 33.5, 33.5,
                  33.5, 33.5, 33.5,
                  33.5, 33.5, 33.5 ]
+
+# 添加相机配置段
+use_camera: true
+depth_width: 80
+depth_height: 80
+max_depth: 2.0
+depth_feature_dim: 6400  # 若使用CNN提取特征，需改为实际输出维度
+use_depth_cnn: false  # 若使用预训练CNN设为true
+depth_cnn_model: "depth_encoder.pt"  # 特征提取模型文件名

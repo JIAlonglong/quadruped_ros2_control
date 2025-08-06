@@ -72,7 +72,7 @@ StateRL::StateRL(CtrlInterfaces& ctrl_interfaces,
     RCLCPP_INFO(node_->get_logger(), "Using robot model from %s", robot_pkg_.c_str());
     const std::string package_share_directory = ament_index_cpp::get_package_share_directory(robot_pkg_);
     const std::string model_path = package_share_directory + "/config/" + model_folder_;
-
+    
     for (int i = 0; i < 12; i++)
     {
         init_pos_[i] = target_pos[i];
@@ -80,6 +80,18 @@ StateRL::StateRL(CtrlInterfaces& ctrl_interfaces,
 
     // read params from yaml
     loadYaml(model_path);
+
+    // 是否使用相机
+    if(params_.use_camera){
+        depth_image_sub_ = node_->create_subscription<sensor_msgs::msg::Image>(
+            "/depth_image/image_raw", 10,
+            [this](const sensor_msgs::msg::Image::SharedPtr msg)
+            {
+                std::lock_guard<std::mutex> lock(depth_mutex_);
+                depth_image_ = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::TYPE_32FC1)->image;
+            });
+        RCLCPP_INFO(node_->get_logger(), "Depth camera subscription initialized");
+    }
 
     if (!params_.observations_history.empty())
     {
@@ -365,8 +377,22 @@ void StateRL::loadYaml(const std::string& config_path)
     params_.ang_vel_scale = config["ang_vel_scale"].as<double>();
     params_.dof_pos_scale = config["dof_pos_scale"].as<double>();
     params_.dof_vel_scale = config["dof_vel_scale"].as<double>();
-    // 是否使用相机
+    params_.delta_yaw_scale = config["delta_yaw_scale"].as<double>();
+    
+    // 相机参数加载（默认值参考extreme-parkour 配置）
     params_.use_camera = config["use_camera"].as<bool>(false);
+    if (params_.use_camera) {
+        params_.depth_width = config["depth_width"].as<int>(80);
+        params_.depth_height = config["depth_height"].as<int>(80);
+        params_.max_depth = config["max_depth"].as<double>(2.0);  // 有效深度范围上限
+        params_.depth_feature_dim = config["depth_feature_dim"].as<int>(6400);  // 80x80=6400
+        params_.use_depth_cnn = config["use_depth_cnn"].as<bool>(false);
+        if (params_.use_depth_cnn) {
+            // 加载深度特征提取模型 (若使用CNN)
+            std::string cnn_model_path = config_path + "/" + config["depth_cnn_model"].as<std::string>();
+            depth_cnn_model_ = torch::jit::load(cnn_model_path);
+        }
+    }
     // params_.commands_scale = torch::tensor(ReadVectorFromYaml<double>(config["commands_scale"])).view({1, -1});
     params_.commands_scale = torch::tensor({params_.lin_vel_scale, params_.lin_vel_scale, params_.ang_vel_scale});
     params_.rl_kp = torch::tensor(ReadVectorFromYaml<double>(config["rl_kp"], params_.framework, rows, cols)).view({
@@ -480,11 +506,12 @@ void StateRL::runModel()
     }
     obs_.ang_vel = torch::tensor(robot_state_.imu.gyroscope).unsqueeze(0);
     obs_.commands = torch::tensor({{control_.x, control_.y, control_.yaw}});
-    obs_.base_quat = torch::tensor(robot_state_.imu.quaternion).unsqueeze(0);
+    obs_.imu_obs = torch::tensor(robot_state_.imu.quaternion).unsqueeze(0);
     obs_.dof_pos = torch::tensor(robot_state_.motor_state.q).narrow(0, 0, params_.num_of_dofs).unsqueeze(0);
     obs_.dof_vel = torch::tensor(robot_state_.motor_state.dq).narrow(0, 0, params_.num_of_dofs).unsqueeze(0);
-
-    const torch::Tensor clamped_actions = forward();
+    // 扩展观测
+    // 计算delta_yaw（其实就是角速度）
+    obs_.delta_yaw = torch::tensor(robot_state_.imu.gyroscope[2]).unsqueeze(0);
 
     for (const int i : params_.hip_scale_reduction_indices)
     {
@@ -525,5 +552,36 @@ void StateRL::setCommand() const
         ctrl_interfaces_.joint_torque_command_interface_[i].get().
                                                                           set_value(
                                                                               robot_command_.motor_command.tau[i]);
+    }
+}
+
+torch::Tensor StateRL::preprocessDepthImage() {
+    std::lock_guard<std::mutex> lock(depth_mutex_);
+    if (depth_image_.empty()) {
+        // 若未接收到图像，返回零张量
+        return torch::zeros({1, params_.depth_feature_dim}, torch::kFloat32);
+    }
+
+    // 1. 调整图像大小 (extreme-parkour通常使用80x80或160x120)
+    cv::Mat resized;
+    cv::resize(depth_image_, resized, cv::Size(params_.depth_width, params_.depth_height));
+    
+    // 2. 归一化深度值 (转为米并截断有效范围)
+    cv::Mat normalized;
+    resized.convertTo(normalized, CV_32F, 0.001);  // 假设16UC1单位为mm
+    cv::threshold(normalized, normalized, params_.max_depth, params_.max_depth, cv::THRESH_TRUNC);
+    normalized /= params_.max_depth;  // 归一化到[0,1]
+    
+    // 3. 转换为PyTorch张量并添加批次维度
+    torch::Tensor depth_tensor = torch::from_blob(normalized.data, 
+        {1, params_.depth_height, params_.depth_width}, torch::kFloat32);
+    
+    // 4. 扁平化或通过CNN提取特征 (若使用预训练特征提取器)
+    if (params_.use_depth_cnn) {
+        // 此处需加载预训练CNN模型 (参考extreme-parkour的depth_encoder.pt)
+        return depth_cnn_model_.forward({depth_tensor}).toTensor().view({1, -1});
+    } else {
+        // 简单扁平化 (需确保与训练时维度一致)
+        return depth_tensor.flatten(1);
     }
 }

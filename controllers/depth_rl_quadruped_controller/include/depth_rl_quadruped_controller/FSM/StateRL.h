@@ -119,6 +119,14 @@ struct ModelParams
     torch::Tensor rl_kp;
     torch::Tensor commands_scale;
     torch::Tensor default_dof_pos;
+    // 相机参数
+    bool use_camera;
+    int depth_width;
+    int depth_height;
+    double max_depth;
+    int depth_feature_dim;
+    bool use_depth_cnn;
+    std::string depth_cnn_model;
 };
 
 struct Observations
@@ -130,7 +138,8 @@ struct Observations
     torch::Tensor ang_vel;         // 基底盘角速度（三维），形状 [N, 3]
     torch::Tensor gravity_vec;     // 重力向量（三维，机体坐标系），形状 [N, 3]
     torch::Tensor commands;        // 控制命令（如 x速度、y速度、yaw角速度），形状 [N, 3]
-    torch::Tensor base_quat;       // 基底盘姿态四元数（x,y,z,w 或 w,x,y,z），形状 [N, 4]
+    // torch::Tensor base_quat;       // 基底盘姿态四元数（x,y,z,w 或 w,x,y,z），形状 [N, 4]
+    torch::Tensor imu_obs;
     torch::Tensor dof_pos;         // 关节位置（每个关节的角度），形状 [N, K]（K为关节数量）
     torch::Tensor dof_vel;         // 关节速度（每个关节的角速度），形状 [N, K]
     torch::Tensor actions;         // 上一步动作（关节控制量），形状 [N, K]
@@ -168,6 +177,8 @@ public:
     void exit() override;
 
     FSMStateName checkChange() override;
+
+    torch::Tensor preprocessDepthImage();
 
 private:
     torch::Tensor computeObservation();
@@ -218,6 +229,11 @@ private:
     // output buffer
     torch::Tensor output_torques;
     torch::Tensor output_dof_pos_;
+
+    // depth
+    rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr depth_image_sub_;
+    cv::Mat depth_image_;
+    std::mutex depth_mutex_;  // 线程安全锁
 };
 
 
