@@ -122,6 +122,8 @@ namespace depth_rl_quadruped_controller
         FSMStateList state_list_;
         std::shared_ptr<FSMState> current_state_;
         std::shared_ptr<FSMState> next_state_;
+
+        bool robot_model_loaded_ = false;
     };
 }
 #endif //LEGGEDGYMCONTROLLER_H

@@ -51,6 +51,10 @@ set(dependencies
         kdl_parser
         ament_index_cpp
         controller_common
+        OpenCV
+        cv_bridge
+        tf2
+        tf2_geometry_msgs
 )
 
 # find dependencies
@@ -108,6 +112,11 @@ install(
 
 install(
         DIRECTORY launch
+        DESTINATION share/${PROJECT_NAME}/
+)
+
+install(
+        DIRECTORY config
         DESTINATION share/${PROJECT_NAME}/
 )
 

@@ -8,7 +8,10 @@
 #include <common/ObservationBuffer.h>
 #include <depth_rl_quadruped_controller/control/CtrlComponent.h>
 #include <torch/script.h>
-
+#include "sensor_msgs/msg/image.hpp"  
+#include <opencv2/core/mat.hpp>        
+#include <cv_bridge/cv_bridge.h>       
+#include <mutex>                      
 #include "controller_common/FSM/FSMState.h"
 
 struct CtrlComponent;
@@ -88,45 +91,56 @@ struct Control
     double yaw = 0.0;
 };
 
+// 这里需要根据训练代码修改具体的模型参数
 struct ModelParams
-{
-    std::string model_name;
-    std::string framework;
-    int decimation;
-    int num_observations;
-    bool use_camera;
-    std::vector<std::string> observations;
-    std::vector<int> observations_history;
-    int num_feet;
-    int mass_params_dim;                  // 质量参数维度（对应priv_latent中的质量参数）
-    int friction_dim;                     // 摩擦系数维度（对应priv_latent中的摩擦参数）
-    double damping;
-    double stiffness;
-    double action_scale;
-    double hip_scale_reduction;
-    std::vector<int> hip_scale_reduction_indices;
-    int num_of_dofs;
-    double lin_vel_scale;
-    double ang_vel_scale;
-    double dof_pos_scale;
-    double dof_vel_scale;
-    double delta_yaw_scale;
-    double clip_obs;
-    torch::Tensor clip_actions_upper;
-    torch::Tensor clip_actions_lower;
-    torch::Tensor torque_limits;
-    torch::Tensor rl_kd;
-    torch::Tensor rl_kp;
-    torch::Tensor commands_scale;
-    torch::Tensor default_dof_pos;
-    // 相机参数
-    bool use_camera;
-    int depth_width;
-    int depth_height;
-    double max_depth;
-    int depth_feature_dim;
-    bool use_depth_cnn;
-    std::string depth_cnn_model;
+    {
+        std::string model_name;
+        std::string framework;
+        int decimation;
+        int num_observations;
+        bool use_camera;
+        std::vector<std::string> observations;
+        std::vector<int> observations_history;
+        int num_feet;
+        int mass_params_dim;                  // 质量参数维度（对应priv_latent中的质量参数）
+        int friction_dim;                     // 摩擦系数维度（对应priv_latent中的摩擦参数）
+        double damping;
+        double stiffness;
+        double action_scale;
+        double hip_scale_reduction;
+        std::vector<int> hip_scale_reduction_indices;
+        int num_of_dofs;
+        double lin_vel_scale;
+        double ang_vel_scale;
+        double dof_pos_scale;
+        double dof_vel_scale;
+        double delta_yaw_scale;
+        double clip_obs;
+        double clip_actions; // 动作裁剪范围
+        torch::Tensor clip_actions_upper;
+        torch::Tensor clip_actions_lower;
+        torch::Tensor torque_limits;
+        torch::Tensor rl_kd;
+        torch::Tensor rl_kp;
+        torch::Tensor commands_scale;
+        torch::Tensor default_dof_pos;
+        double kp; // 比例增益
+        double kd; // 微分增益
+        double foot_force_threshold; // 足部接触力阈值
+        std::vector<std::vector<double>> dof_pos_limits; // 关节位置限制
+        // 相机参数
+        int depth_width;
+        int depth_height;
+        double max_depth;
+        int depth_feature_dim;
+        bool use_depth_cnn;
+        std::string depth_cnn_model;
+        // 观测结构
+        int num_proprio;      // 基础本体观测维度（turn_obs 中的 proprio）
+        int num_hist_len;     // 历史窗口长度
+        int num_scan;         // 深度/scan 特征维度
+        int num_priv_explicit;// 显式 privileged 观测维度
+        int num_priv_latent;  // 历史编码后的 latent 维度
 };
 
 struct Observations
@@ -138,7 +152,7 @@ struct Observations
     torch::Tensor ang_vel;         // 基底盘角速度（三维），形状 [N, 3]
     torch::Tensor gravity_vec;     // 重力向量（三维，机体坐标系），形状 [N, 3]
     torch::Tensor commands;        // 控制命令（如 x速度、y速度、yaw角速度），形状 [N, 3]
-    // torch::Tensor base_quat;       // 基底盘姿态四元数（x,y,z,w 或 w,x,y,z），形状 [N, 4]
+    torch::Tensor base_quat;       // 基底盘姿态四元数（x,y,z,w 或 w,x,y,z），形状 [N, 4]
     torch::Tensor imu_obs;
     torch::Tensor dof_pos;         // 关节位置（每个关节的角度），形状 [N, K]（K为关节数量）
     torch::Tensor dof_vel;         // 关节速度（每个关节的角速度），形状 [N, K]
@@ -160,11 +174,13 @@ struct Observations
     torch::Tensor mass_params;     // 机器人质量参数，形状 [N, M]（M为质量参数维度）
     torch::Tensor friction_coeffs; // 地面摩擦系数，形状 [N, C]（C为摩擦参数维度）
     torch::Tensor motor_strength;  // 电机强度参数（两组），形状 [N, 2]
+    torch::Tensor depth_latent;    // 深度图像特征，形状 [N, D]（D为深度特征维度）
 };
 
 class StateRL final : public FSMState
 {
 public:
+    // 带参数的构造函数
     explicit StateRL(CtrlInterfaces& ctrl_interfaces,
                      CtrlComponent& ctrl_component,
                      const std::vector<double>& target_pos);
@@ -178,30 +194,31 @@ public:
 
     FSMStateName checkChange() override;
 
-    torch::Tensor preprocessDepthImage();
-
 private:
-    torch::Tensor computeObservation();
-
-    void loadYaml(const std::string& config_path);
 
     static torch::Tensor quatRotateInverse(const torch::Tensor& q, const torch::Tensor& v,
                                            const std::string& framework);
 
-    /**
-    * @brief Forward the RL model to get the action
-    */
-    torch::Tensor forward();
+    // 观测计算
+    torch::Tensor computeObservation();
+
+    // 处理深度图像
+    torch::Tensor preprocessDepthImage(const sensor_msgs::msg::Image::SharedPtr msg);
+    
+    // 加载模型和配置
+    void loadYaml(const std::string& config_path);
 
     void getState();
 
+    // 运行模型
     void runModel();
 
     void setCommand() const;
 
     std::shared_ptr<rclcpp_lifecycle::LifecycleNode> node_;
-    std::string robot_pkg_ = "go2_description";
-    std::string model_folder_ = "legged_gym";
+    // 默认配置
+    std::string robot_pkg_ = "depth_go2_description";
+    std::string model_folder_ = "extreme_parkout_common";
 
     bool enable_estimator_;
     std::shared_ptr<Estimator>& estimator_;
@@ -211,6 +228,9 @@ private:
     Observations obs_;
     Control control_;
     double init_pos_[12] = {};
+    double start_pos_[12] = {};
+    double transition_percent_ = 0.0;
+    double transition_duration_ = 1.0;
 
     RobotState<double> robot_state_;
     RobotCommand<double> robot_command_;
@@ -218,22 +238,39 @@ private:
     // history buffer
     std::shared_ptr<ObservationBuffer> history_obs_buf_;
     torch::Tensor history_obs_;
+    torch::Tensor last_contact_bool_;
 
     // rl module
-    torch::jit::script::Module model_;
     bool use_rl_thread_ = true;
     std::thread rl_thread_;
     bool running_ = false;
     bool updated_ = false;
+    bool model_loaded_ = false;
+    bool depth_model_loaded_ = false;
 
     // output buffer
     torch::Tensor output_torques;
     torch::Tensor output_dof_pos_;
 
-    // depth
+    // 相机相关
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr depth_image_sub_;
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr depth_image_pub_;
     cv::Mat depth_image_;
-    std::mutex depth_mutex_;  // 线程安全锁
+    std::mutex depth_mutex_;
+    
+    // RGB相机相关
+    rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr rgb_image_sub_;
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr rgb_image_pub_;
+    cv::Mat rgb_image_;
+    std::mutex rgb_mutex_;  // 线程安全锁
+
+    std::mutex mtx_;  // 模型加载锁
+
+    // TorchScript modules
+    torch::jit::script::Module policy_module_;     // TorchScript 策略网络（camera-policy）
+    torch::jit::script::Module depth_encoder_module_; // TorchScript 视觉编码器（vision_jit）
+    torch::Tensor latest_depth_tensor_;            // 最新缓存的深度图张量（归一化后）
+    torch::Device device_ = torch::kCPU;           // 默认推理设备
 };
 
 

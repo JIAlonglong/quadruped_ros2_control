@@ -9,7 +9,6 @@
   <xacro:include filename="$(find depth_go2_description)/xacro/const.xacro"/>
   <xacro:include filename="$(find depth_go2_description)/xacro/materials.xacro"/>
   <xacro:include filename="$(find depth_go2_description)/xacro/leg.xacro"/>
-  <xacro:include filename="$(find realsense2_description)/urdf/_d435i.urdf.xacro"/>
 
   <xacro:if value="$(arg GAZEBO)">
     <xacro:if value="$(arg CLASSIC)">
@@ -48,9 +47,7 @@
     </visual>
   </link>
 
-  <xacro:sensor_d435i parent="base" name="depth_camera" use_nominal_extrinsics="false">
-        <origin xyz="0.27 0 0.08" rpy="0 0 0"/>
-  </xacro:sensor_d435i>
+
 
   <joint name="floating_base" type="fixed">
     <origin rpy="0 0 0" xyz="0 0 0"/>
@@ -125,15 +122,6 @@
         <box size=".001 .001 .001"/>
       </geometry>
     </collision>
-  </link>
-
-  <joint name="camera_joint_front" type="fixed">
-    <parent link="trunk"/>
-    <child link="front_camera"/>
-    <origin rpy="0 0 0" xyz="0.32715 0 0.04297"/>
-  </joint>
-
-  <link name="front_camera">
   </link>
 
   <joint name="lidar_joint" type="fixed">

@@ -156,7 +156,16 @@
       <state_interface name="FR_foot_force"/>
       <state_interface name="FL_foot_force"/>
       <state_interface name="RR_foot_force"/>
-      <state_interface name="RL_foot_force"/>
+      <state_interface name="RL_foot_force"/> 
+    </sensor>
+
+    <sensor name="odometer">
+      <state_interface name="position.x"/>
+      <state_interface name="position.y"/>
+      <state_interface name="position.z"/>
+      <state_interface name="velocity.x"/>
+      <state_interface name="velocity.y"/>
+      <state_interface name="velocity.z"/>
     </sensor>
 
   </ros2_control>
@@ -254,38 +263,9 @@
     <xacro:include filename="$(find gz_quadruped_playground)/models/D435/model.xacro"/>
 
     <xacro:d435 camID="1" name="d435">
-      <origin rpy="0 0.1 0" xyz="0.28 0 0.093"/>
+      <origin rpy="0 0.2 0" xyz="0.30 0 0.10"/>
     </xacro:d435>
 
-    <gazebo reference="front_camera">
-      <sensor name="front_camera" type="camera">
-        <camera>
-          <horizontal_fov>2.094</horizontal_fov>
-          <image>
-            <width>1280</width>
-            <height>720</height>
-          </image>
-          <clip>
-            <near>0.1</near>
-            <far>15</far>
-          </clip>
-          <noise>
-            <type>gaussian</type>
-            <!-- Noise is sampled independently per pixel on each frame.
-                That pixel's noise value is added to each of its color
-                channels, which at that point lie in the range [0,1]. -->
-            <mean>0.0</mean>
-            <stddev>0.007</stddev>
-          </noise>
-          <optical_frame_id>front_camera</optical_frame_id>
-          <camera_info_topic>camera/camera_info</camera_info_topic>
-        </camera>
-        <always_on>true</always_on>
-        <update_rate>15</update_rate>
-        <visualize>true</visualize>
-        <topic>camera/image</topic>
-      </sensor>
-    </gazebo>
     <gazebo reference="lidar">
       <sensor name='L1_lidar' type='gpu_lidar'>
         <topic>scan</topic>
