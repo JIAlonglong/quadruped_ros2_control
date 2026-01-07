@@ -107,6 +107,7 @@ struct ModelParams
         double damping;
         double stiffness;
         double action_scale;
+        double action_filter_alpha;
         double hip_scale_reduction;
         std::vector<int> hip_scale_reduction_indices;
         int num_of_dofs;
@@ -135,6 +136,8 @@ struct ModelParams
         int depth_feature_dim;
         bool use_depth_cnn;
         std::string depth_cnn_model;
+        double depth_yaw_clip;
+        double depth_yaw_alpha;
         // 观测结构
         int num_proprio;      // 基础本体观测维度（turn_obs 中的 proprio）
         int num_hist_len;     // 历史窗口长度
@@ -219,6 +222,7 @@ private:
     // 默认配置
     std::string robot_pkg_ = "depth_go2_description";
     std::string model_folder_ = "extreme_parkout_common";
+    std::string config_folder_;
 
     bool enable_estimator_;
     std::shared_ptr<Estimator>& estimator_;
@@ -257,6 +261,10 @@ private:
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr depth_image_pub_;
     cv::Mat depth_image_;
     std::mutex depth_mutex_;
+    torch::Tensor depth_yaw_filtered_;
+    bool has_depth_yaw_filtered_ = false;
+    torch::Tensor actions_filtered_;
+    bool has_actions_filtered_ = false;
     
     // RGB相机相关
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr rgb_image_sub_;

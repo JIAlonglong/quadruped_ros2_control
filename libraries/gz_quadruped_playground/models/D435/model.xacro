@@ -79,7 +79,12 @@
         <always_on>true</always_on>
         <update_rate>30</update_rate>
         <visualize>true</visualize>
-        <topic>rgbd_${name}</topic>
+        <!--
+          重要：topic 需要以 '/' 开头，否则 Gazebo 会对传感器话题自动加上模型/链接/传感器作用域前缀，
+          导致我们在 ros_gz_bridge 中订阅的 /rgbd_d435/image、/rgbd_d435/depth_image 找不到 publisher。
+          这里显式发布到全局话题，便于 ROS2 桥接与 RViz 直接订阅。
+        -->
+        <topic>/rgbd_${name}</topic>
       </sensor>
     </gazebo>
   </xacro:macro>

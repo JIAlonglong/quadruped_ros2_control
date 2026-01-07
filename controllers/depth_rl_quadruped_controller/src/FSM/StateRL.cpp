@@ -97,17 +97,24 @@ StateRL::StateRL(CtrlInterfaces& ctrl_interfaces,
     if (!node_->has_parameter("use_rl_thread")) {
         node_->declare_parameter("use_rl_thread", use_rl_thread_);
     }
+    if (!node_->has_parameter("config_folder")) {
+        node_->declare_parameter("config_folder", std::string());
+    }
 
     robot_pkg_ = node_->get_parameter("robot_pkg").as_string();
     model_folder_ = node_->get_parameter("model_folder").as_string();
     use_rl_thread_ = node_->get_parameter("use_rl_thread").as_bool();
+    config_folder_ = node_->get_parameter("config_folder").as_string();
     params_.use_camera = node_->get_parameter("use_camera").as_bool();
     RCLCPP_INFO(node_->get_logger(), "Loaded parameters - robot_pkg: %s, model_folder: %s, use_rl_thread: %s, use_camera: %s",
                robot_pkg_.c_str(), model_folder_.c_str(), use_rl_thread_ ? "true" : "false", params_.use_camera ? "true" : "false");
 
     RCLCPP_INFO(node_->get_logger(), "Using robot model from %s", robot_pkg_.c_str());
     const std::string package_share_directory = ament_index_cpp::get_package_share_directory(robot_pkg_);
-    const std::string model_path = package_share_directory + "/config/" + model_folder_;
+    std::string model_path = package_share_directory + "/config/" + model_folder_;
+    if (!config_folder_.empty()) {
+        model_path = config_folder_;
+    }
     
     // target_pos 是初始/默认姿态（12 个关节），用于对齐训练时的 default_dof_pos
     if (target_pos.size() != 12) {
@@ -155,8 +162,8 @@ StateRL::StateRL(CtrlInterfaces& ctrl_interfaces,
                     obs_.depth_latent = preprocessDepthImage(msg);
 
                     cv::Mat depth_vis = depth_m.clone();
-                    cv::patchNaNs(depth_vis, 0.0);
                     const float far_clip = std::max(1e-6f, static_cast<float>(params_.max_depth));
+                    cv::patchNaNs(depth_vis, far_clip);
                     cv::max(depth_vis, 0.0, depth_vis);
                     cv::min(depth_vis, far_clip, depth_vis);
 
@@ -434,6 +441,7 @@ void StateRL::loadYaml(const std::string& config_path)
     }
 
     params_.action_scale = config["action_scale"].as<double>();
+    params_.action_filter_alpha = config["action_filter_alpha"].as<double>(0.8);
     params_.hip_scale_reduction = config["hip_scale_reduction"].as<double>();
     params_.hip_scale_reduction_indices = ReadVectorFromYaml<int>(config["hip_scale_reduction_indices"]);
     params_.num_of_dofs = config["num_of_dofs"].as<int>();
@@ -461,7 +469,7 @@ void StateRL::loadYaml(const std::string& config_path)
         params_.num_proprio, params_.num_scan, params_.num_priv_explicit,
         params_.num_priv_latent, params_.num_hist_len);
 
-    // 相机相关参数：当 use_camera/use_depth_cnn 打开时，会尝试加载 vision_jit.pt 做深度特征提取
+    // 相机相关参数：当 use_camera/use_depth_cnn 打开时，会尝试加载深度特征模型做编码
     // 注意：这里的 depth_feature_dim 与训练侧保持一致（Extreme Parkour 里通常是 32 维 latent + 2 维 yaw）
     params_.use_camera = config["use_camera"].as<bool>(false);
     params_.use_depth_cnn = config["use_depth_cnn"].as<bool>(false);
@@ -470,17 +478,20 @@ void StateRL::loadYaml(const std::string& config_path)
         params_.depth_width = config["depth_width"].as<int>(58);   // 与 Python 中的 58x87 保持一致
         params_.depth_height = config["depth_height"].as<int>(87);
         params_.max_depth = config["max_depth"].as<double>(2.0);   // 有效深度范围上限
+        params_.depth_cnn_model = config["depth_cnn_model"].as<std::string>("vision_weight.pt");
+        params_.depth_yaw_clip = config["depth_yaw_clip"].as<double>(0.8);
+        params_.depth_yaw_alpha = config["depth_yaw_alpha"].as<double>(0.9);
         
         // Extreme Parkour 的 TorchScript 视觉骨干输出 32 维 latent + 2 维偏航
         params_.depth_feature_dim = 32;
         
         if (params_.use_depth_cnn)
         {
-            // vision_jit.pt 的候选路径：同目录、开发目录、安装目录
             const std::vector<std::string> depth_model_candidates = {
-                config_path + "/vision_jit.pt",
+                config_path + "/" + params_.depth_cnn_model,
             };
-            
+
+            std::string last_depth_model_error;
             for (const auto& candidate : depth_model_candidates)
             {
                 try
@@ -494,13 +505,21 @@ void StateRL::loadYaml(const std::string& config_path)
                 }
                 catch (const std::exception& e)
                 {
-                    RCLCPP_DEBUG(rclcpp::get_logger("StateRL"), "尝试加载深度模型失败: %s (%s)", candidate.c_str(), e.what());
+                    last_depth_model_error = e.what();
+                    RCLCPP_WARN(rclcpp::get_logger("StateRL"), "尝试加载深度模型失败: %s (%s)", candidate.c_str(), e.what());
                 }
             }
             
             if (!depth_model_loaded_)
             {
-                RCLCPP_ERROR(rclcpp::get_logger("StateRL"), "未找到可用的 vision_jit.pt，禁用相机特征。");
+                if (!last_depth_model_error.empty())
+                {
+                    RCLCPP_ERROR(rclcpp::get_logger("StateRL"), "深度特征模型加载失败 %s: %s，禁用相机特征。", params_.depth_cnn_model.c_str(), last_depth_model_error.c_str());
+                }
+                else
+                {
+                    RCLCPP_ERROR(rclcpp::get_logger("StateRL"), "未找到可用的深度特征模型 %s，禁用相机特征。", params_.depth_cnn_model.c_str());
+                }
                 params_.use_camera = false;
                 params_.use_depth_cnn = false;
             }
@@ -720,7 +739,7 @@ void StateRL::runModel()
             {
                 const float v = static_cast<float>(ctrl_interfaces_.foot_force_state_interface_[i].get().get_value());
                 const bool contact_now = (v <= 1.5f)
-                    ? (v > 0.5f)
+                    ? (v > 1.0f)
                     : (v > static_cast<float>(params_.foot_force_threshold));
                 contact_bool[0][i] = contact_now;
             }
@@ -781,24 +800,39 @@ void StateRL::runModel()
                     depth_inputs.emplace_back(proprio);
                     torch::Tensor depth_output = sanitize_tensor(depth_encoder_module_.forward(depth_inputs).toTensor());
 
-                // 校验输出形状是否满足：[1, depth_feature_dim + 2]（latent + yaw2）
-                if (depth_output.sizes().size() == 2 && depth_output.size(0) == 1 &&
-                    depth_output.size(1) >= params_.depth_feature_dim + 2)
-                {
-                    // depth_output 前 depth_feature_dim 是视觉 latent，后面两维可以作为 yaw 信息加入 proprio
-                    depth_latent = depth_output.index({0, torch::indexing::Slice(0, params_.depth_feature_dim)}).unsqueeze(0);
-                    torch::Tensor yaw_from_depth =
-                        sanitize_tensor(depth_output.index({0, torch::indexing::Slice(params_.depth_feature_dim,
-                                                                                     params_.depth_feature_dim + 2)}).unsqueeze(0) * 1.5f);
-                    // 把 depth encoder 输出的 yaw 写回 proprio 的相应 slice（这里假设 [6,8) 是 yaw 的位置）
-                    proprio.index_put_({torch::indexing::Slice(), torch::indexing::Slice(6, 8)}, yaw_from_depth);
+                    if (depth_output.sizes().size() == 2 && depth_output.size(0) == 1 &&
+                        depth_output.size(1) >= params_.depth_feature_dim + 2)
+                    {
+                        depth_latent = depth_output.index({0, torch::indexing::Slice(0, params_.depth_feature_dim)}).unsqueeze(0);
+                        torch::Tensor yaw_from_depth =
+                            sanitize_tensor(depth_output.index({0, torch::indexing::Slice(params_.depth_feature_dim,
+                                                                                         params_.depth_feature_dim + 2)}).unsqueeze(0) * 1.5f);
+
+                        const float yaw_clip = static_cast<float>(params_.depth_yaw_clip);
+                        yaw_from_depth = torch::clamp(yaw_from_depth, -yaw_clip, yaw_clip);
+
+                        const float alpha = static_cast<float>(params_.depth_yaw_alpha);
+                        if (!has_depth_yaw_filtered_ ||
+                            !depth_yaw_filtered_.defined() ||
+                            depth_yaw_filtered_.sizes() != yaw_from_depth.sizes())
+                        {
+                            depth_yaw_filtered_ = yaw_from_depth.clone();
+                            has_depth_yaw_filtered_ = true;
+                        }
+                        else
+                        {
+                            depth_yaw_filtered_ = depth_yaw_filtered_ * alpha +
+                                                  yaw_from_depth * (1.0f - alpha);
+                        }
+
+                        proprio.index_put_({torch::indexing::Slice(), torch::indexing::Slice(6, 8)}, depth_yaw_filtered_);
+                    }
+                    else
+                    {
+                        RCLCPP_WARN_THROTTLE(rclcpp::get_logger("StateRL"), *node_->get_clock(), 2000,
+                                             "Depth encoder output shape unexpected.");
+                    }
                 }
-                else
-                {
-                    RCLCPP_WARN_THROTTLE(rclcpp::get_logger("StateRL"), *node_->get_clock(), 2000,
-                                         "Depth encoder output shape unexpected.");
-                }
-            }
             }
             catch (const std::exception& e)
             {
@@ -863,8 +897,21 @@ void StateRL::runModel()
             }
         }
 
-        // 将动作缩放并叠加默认关节角，得到最终目标关节位置（P 控制）
-        torch::Tensor actions_scaled = sanitize_tensor(actions_clamped * static_cast<float>(params_.action_scale));
+        const float action_alpha = static_cast<float>(params_.action_filter_alpha);
+        if (!has_actions_filtered_ ||
+            !actions_filtered_.defined() ||
+            actions_filtered_.sizes() != actions_clamped.sizes())
+        {
+            actions_filtered_ = actions_clamped.clone();
+            has_actions_filtered_ = true;
+        }
+        else
+        {
+            actions_filtered_ = actions_filtered_ * action_alpha +
+                                actions_clamped * (1.0f - action_alpha);
+        }
+
+        torch::Tensor actions_scaled = sanitize_tensor(actions_filtered_ * static_cast<float>(params_.action_scale));
         torch::Tensor output_dof_pos_policy = sanitize_tensor(actions_scaled + default_dof_pos);
         output_dof_pos_ = sanitize_tensor(output_dof_pos_policy.index_select(1, dof_reindex));
 
@@ -878,8 +925,7 @@ void StateRL::runModel()
             output_dof_pos_ = output_dof_pos_ * phase + start_pos_tensor * (1.0 - phase);
         }
 
-        // 将动作拷回到 cpu 保存为 obs_.actions（用于下一步历史或调试）
-        obs_.actions = actions_clamped.index_select(1, dof_reindex).to(torch::kCPU);
+        obs_.actions = actions_filtered_.index_select(1, dof_reindex).to(torch::kCPU);
 
         // ==================== 6. 写入电机命令（robot_command_ -> joint interfaces） ====================
         // 这里只写 robot_command_ 缓存；真正写 ros2_control 接口在 setCommand() 完成

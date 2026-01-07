@@ -178,6 +178,9 @@ public:
     /// \brief vector with the foot force-torque sensors.
     std::vector<std::shared_ptr<ForceTorqueData>> ft_sensors_;
 
+    std::array<double, 6> odom_data_{};
+    bool has_odometer_{false};
+
     /// \brief state interfaces that will be exported to the Resource Manager
     std::vector<hardware_interface::StateInterface> state_interfaces_;
 
@@ -524,6 +527,37 @@ namespace gz_quadruped_hardware
                 this->dataPtr->ft_sensors_.push_back(ftData);
                 return true;
             });
+
+        for (const auto& component : sensor_components_)
+        {
+            if (component.name != "odometer")
+            {
+                continue;
+            }
+
+            this->dataPtr->has_odometer_ = true;
+            static const std::map<std::string, size_t> interface_name_map = {
+                {"position.x", 0},
+                {"position.y", 1},
+                {"position.z", 2},
+                {"velocity.x", 3},
+                {"velocity.y", 4},
+                {"velocity.z", 5},
+            };
+
+            for (const auto& state_interface : component.state_interfaces)
+            {
+                const auto it = interface_name_map.find(state_interface.name);
+                if (it == interface_name_map.end())
+                {
+                    continue;
+                }
+                this->dataPtr->state_interfaces_.emplace_back(
+                    component.name,
+                    state_interface.name,
+                    &this->dataPtr->odom_data_[it->second]);
+            }
+        }
     }
 
     CallbackReturn GazeboSimSystem::on_init(const hardware_interface::HardwareInfo& info)

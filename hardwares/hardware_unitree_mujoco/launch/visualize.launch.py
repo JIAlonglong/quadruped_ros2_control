@@ -3,7 +3,7 @@ import os
 import xacro
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, OpaqueFunction, IncludeLaunchDescription, RegisterEventHandler
+from launch.actions import DeclareLaunchArgument, OpaqueFunction, RegisterEventHandler
 from launch.event_handlers import OnProcessExit
 from launch.substitutions import PathJoinSubstitution
 from launch_ros.actions import Node
@@ -28,23 +28,23 @@ def launch_setup(context, *args, **kwargs):
     rviz_config_file = os.path.join(get_package_share_directory(package_description), "config", "visualize_urdf.rviz")
 
     rviz = Node(
-        package='rviz2',
-        executable='rviz2',
-        name='rviz_ocs2',
-        output='screen',
-        arguments=["-d", rviz_config_file]
+        package="rviz2",
+        executable="rviz2",
+        name="rviz_ocs2",
+        output="screen",
+        arguments=["-d", rviz_config_file],
     )
 
     robot_state_publisher = Node(
-        package='robot_state_publisher',
-        executable='robot_state_publisher',
-        name='robot_state_publisher',
+        package="robot_state_publisher",
+        executable="robot_state_publisher",
+        name="robot_state_publisher",
         parameters=[
             {
-                'publish_frequency': 20.0,
-                'use_tf_static': True,
-                'robot_description': robot_description,
-                'ignore_timestamp': True
+                "publish_frequency": 20.0,
+                "use_tf_static": True,
+                "robot_description": robot_description,
+                "ignore_timestamp": True,
             }
         ],
     )
@@ -59,31 +59,70 @@ def launch_setup(context, *args, **kwargs):
         output="both",
     )
 
-    joint_state_publisher = Node(
+    joint_state_broadcaster = Node(
         package="controller_manager",
         executable="spawner",
-        arguments=["joint_state_broadcaster",
-                   "--controller-manager", "/controller_manager"],
+        arguments=[
+            "joint_state_broadcaster",
+            "--controller-manager",
+            "/controller_manager",
+        ],
     )
 
     imu_sensor_broadcaster = Node(
         package="controller_manager",
         executable="spawner",
-        arguments=["imu_sensor_broadcaster",
-                   "--controller-manager", "/controller_manager"],
+        arguments=[
+            "imu_sensor_broadcaster",
+            "--controller-manager",
+            "/controller_manager",
+        ],
+    )
+
+    depth_rl_controller = Node(
+        package="controller_manager",
+        executable="spawner",
+        arguments=[
+            "depth_rl_quadruped_controller",
+            "--controller-manager",
+            "/controller_manager",
+            "-t",
+            "depth_rl_quadruped_controller/LeggedGymController",
+            "--param-file",
+            robot_controllers,
+        ],
+    )
+
+    realsense_camera = Node(
+        package="realsense2_camera",
+        executable="realsense2_camera_node",
+        namespace="rgbd_d435",
+        name="camera",
+        output="screen",
+        parameters=[
+            {
+                "enable_color": True,
+                "enable_depth": True,
+            }
+        ],
+        remappings=[
+            ("color/image_raw", "image"),
+            ("depth/image_rect_raw", "depth_image"),
+        ],
     )
 
     return [
         rviz,
         robot_state_publisher,
         controller_manager,
-        joint_state_publisher,
+        realsense_camera,
+        joint_state_broadcaster,
         RegisterEventHandler(
             event_handler=OnProcessExit(
-                target_action=joint_state_publisher,
-                on_exit=[imu_sensor_broadcaster],
+                target_action=joint_state_broadcaster,
+                on_exit=[imu_sensor_broadcaster, depth_rl_controller],
             )
-        )
+        ),
     ]
 
 
