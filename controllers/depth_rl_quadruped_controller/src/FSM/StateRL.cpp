@@ -162,6 +162,7 @@ StateRL::StateRL(CtrlInterfaces& ctrl_interfaces,
                     obs_.depth_latent = preprocessDepthImage(msg);
 
                     cv::Mat depth_vis = depth_m.clone();
+                    cv::medianBlur(depth_vis, depth_vis, 5);
                     const float far_clip = std::max(1e-6f, static_cast<float>(params_.max_depth));
                     cv::patchNaNs(depth_vis, far_clip);
                     cv::max(depth_vis, 0.0, depth_vis);

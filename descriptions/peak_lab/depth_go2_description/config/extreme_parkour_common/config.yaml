@@ -24,10 +24,10 @@ rl_kp: [ 20, 20, 20,
          20, 20, 20,
          20, 20, 20,
          20, 20, 20 ]
-rl_kd: [ 0.5, 0.5, 0.5,
-         0.5, 0.5, 0.5,
-         0.5, 0.5, 0.5,
-         0.5, 0.5, 0.5 ]
+rl_kd: [ 1.5, 1.5, 1.5,
+         1.5, 1.5, 1.5,
+         1.5, 1.5, 1.5,
+         1.5, 1.5, 1.5 ]
 hip_scale_reduction: 1.0
 hip_scale_reduction_indices: [ 0, 3, 6, 9 ]
 num_of_dofs: 12
@@ -58,10 +58,10 @@ num_priv_latent: 29  # 隐式 privilige latent（由历史编码得到）
 use_camera: true
 depth_width: 87
 depth_height: 58
-max_depth: 2.0       # 深度裁剪距离（米）
+max_depth: 0.5       # 深度裁剪距离（米）
 depth_feature_dim: 32   # 与 vision_jit.pt 输出 latent 长度一致（额外 2 维偏航在代码中单独处理）
 use_depth_cnn: true  # 若使用预训练CNN设为true
 depth_cnn_model: "327-22-54-29500-vision_jit.pt"  # 深度编码器使用 camera-policy-v0-10500 导出的 TorchScript 深度模型
 depth_yaw_clip: 0.7      # 深度网络输出 yaw_from_depth 的裁剪绝对值上限（弧度），越小越保守
-depth_yaw_alpha: 0.0    # 深度 yaw 低通滤波系数，越接近 1.0 越慢越平滑
-action_filter_alpha: 0.0 # 策略输出动作的一阶低通滤波系数，越接近 1.0 越平滑但响应越慢
+depth_yaw_alpha: 0.6    # 深度 yaw 低通滤波系数，越接近 1.0 越慢越平滑
+action_filter_alpha: 0.7 # 策略输出动作的一阶低通滤波系数，越接近 1.0 越平滑但响应越慢

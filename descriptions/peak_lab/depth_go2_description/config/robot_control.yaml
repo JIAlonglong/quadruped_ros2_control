@@ -216,10 +216,10 @@ depth_rl_quadruped_controller:
 
     foot_force_name: "foot_force"
     foot_force_interfaces:
-      - FL_foot_force
-      - FR_foot_force
-      - RL_foot_force
-      - RR_foot_force
+      - FL
+      - FR
+      - RL
+      - RR
 
     imu_name: "imu_sensor"
     base_name: "base"
