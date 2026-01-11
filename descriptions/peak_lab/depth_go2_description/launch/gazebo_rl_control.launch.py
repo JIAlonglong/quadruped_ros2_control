@@ -1,4 +1,6 @@
+import math
 import os
+import random
 
 import xacro
 from ament_index_python.packages import get_package_share_directory
@@ -13,18 +15,19 @@ from launch_ros.substitutions import FindPackageShare
 package_description = "depth_go2_description"
 
 
-def process_xacro():
+def process_xacro(camera_pitch: float = 0.0):
     # 生成 robot_description（URDF XML 字符串），供：
     # - robot_state_publisher 发布 TF
     # - ros_gz_sim/create 在 Gazebo 中生成实体
     pkg_path = os.path.join(get_package_share_directory(package_description))
     xacro_file = os.path.join(pkg_path, 'xacro', 'robot.xacro')
     robot_description_config = xacro.process_file(
-        xacro_file, 
+        xacro_file,
         mappings={
             'GAZEBO': 'true',
             # 在 xacro 中打开外部传感器模块（例如 RGBD 相机 / 深度图 / 点云）
-            'EXTERNAL_SENSORS': 'true'
+            'EXTERNAL_SENSORS': 'true',
+            'CAMERA_PITCH': str(camera_pitch),
         }
     )
     return robot_description_config.toxml()
@@ -52,7 +55,9 @@ def generate_launch_description():
     world_file = PathJoinSubstitution(
         [FindPackageShare(package_description), "worlds", LaunchConfiguration("world")]
     )
-    robot_description = process_xacro()
+    camera_pitch_deg = random.uniform(-5.0, 5.0)
+    camera_pitch_rad = math.radians(camera_pitch_deg)
+    robot_description = process_xacro(camera_pitch_rad)
 
     # 通过 ros_gz_sim 的 create 可执行程序，把 robot_description 里的模型生成到 Gazebo
     gz_spawn_entity = Node(
@@ -109,9 +114,9 @@ def generate_launch_description():
         package="controller_manager",
         executable="spawner",
         arguments=[
-            "depth_rl_quadruped_controller", 
+            "our_depth_rl_quadruped_controller", 
             "--controller-manager", "/controller_manager",
-            "-t", "depth_rl_quadruped_controller/LeggedGymController",
+            "-t", "our_depth_rl_quadruped_controller/LeggedGymController",
             "--param-file", controller_config_file
         ],
         parameters=[

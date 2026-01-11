@@ -160,7 +160,7 @@ StateRL::StateRL(CtrlInterfaces& ctrl_interfaces,
                     }
 
                     obs_.depth_latent = preprocessDepthImage(msg);
-
+                    
                     cv::Mat depth_vis = depth_m.clone();
                     cv::medianBlur(depth_vis, depth_vis, 5);
                     const float far_clip = std::max(1e-6f, static_cast<float>(params_.max_depth));
@@ -173,7 +173,7 @@ StateRL::StateRL(CtrlInterfaces& ctrl_interfaces,
                     img_msg.encoding = sensor_msgs::image_encodings::TYPE_32FC1;
                     img_msg.image = depth_vis;
                     depth_image_pub_->publish(*img_msg.toImageMsg());
-
+                    
                 } catch (const cv_bridge::Exception& e) {
                     RCLCPP_ERROR(rclcpp::get_logger("StateRL"), "cv_bridge异常: %s", e.what());
                 } catch (const std::exception& e) {
@@ -289,7 +289,7 @@ void StateRL::enter()
     // 进入 RL 状态时初始化各类张量/缓存，确保后续拼接与推理不会因为维度错误而崩溃
     // 注意：这里也对一些维度做兜底，避免 YAML 缺字段导致负维度/零维度错误
     if (params_.num_feet <= 0 || params_.mass_params_dim <= 0 || params_.friction_dim <= 0 || params_.num_of_dofs <= 0) {
-        RCLCPP_ERROR(rclcpp::get_logger("StateRL"), "Invalid dimensions detected: num_feet=%d, mass_params_dim=%d, friction_dim=%d, num_of_dofs=%d",
+        RCLCPP_ERROR(rclcpp::get_logger("StateRL"), "Invalid dimensions detected: num_feet=%d, mass_params_dim=%d, friction_dim=%d, num_of_dofs=%d", 
                     params_.num_feet, params_.mass_params_dim, params_.friction_dim, params_.num_of_dofs);
         // 使用安全的默认值
         params_.num_feet = std::max(4, params_.num_feet);
@@ -472,8 +472,8 @@ void StateRL::loadYaml(const std::string& config_path)
 
     // 相机相关参数：当 use_camera/use_depth_cnn 打开时，会尝试加载深度特征模型做编码
     // 注意：这里的 depth_feature_dim 与训练侧保持一致（Extreme Parkour 里通常是 32 维 latent + 2 维 yaw）
-    params_.use_camera = config["use_camera"].as<bool>(false);
-    params_.use_depth_cnn = config["use_depth_cnn"].as<bool>(false);
+        params_.use_camera = config["use_camera"].as<bool>(false);
+            params_.use_depth_cnn = config["use_depth_cnn"].as<bool>(false);
     if (params_.use_camera)
     {
         params_.depth_width = config["depth_width"].as<int>(58);   // 与 Python 中的 58x87 保持一致
@@ -536,10 +536,10 @@ void StateRL::loadYaml(const std::string& config_path)
     });
     params_.torque_limits = torch::tensor(
         ReadVectorFromYaml<double>(config["torque_limits"], params_.framework, rows, cols)).view({1, -1});
-    
+
     // 默认关节角：使用 enter() 传入的 target_pos 初始化，保证与机器人当前默认站立姿态一致
     params_.default_dof_pos = torch::from_blob(init_pos_, {12}, torch::kDouble).clone().to(torch::kFloat).unsqueeze(0);
-    
+
     // params_.default_dof_pos = torch::tensor(
     //     ReadVectorFromYaml<double>(config["default_dof_pos"], params_.framework, rows, cols)).view({1, -1});
 }
@@ -1068,7 +1068,7 @@ torch::Tensor StateRL::preprocessDepthImage(const sensor_msgs::msg::Image::Share
         // 5) 转为 Torch Tensor：[1,H,W]，并缓存到 latest_depth_tensor_
         constexpr int kTargetHeight = 58;
         constexpr int kTargetWidth = 87;
-
+    
     try {
         if (!msg) {
             return torch::zeros({1, kTargetHeight, kTargetWidth}, torch::kFloat32);

@@ -1,5 +1,5 @@
 # ===================== 策略主文件配置 =====================
-model_name: "327-22-54-29500-base_jit.pt"
+model_name: "learn_vision-01092252-posmamba1-film2-ft-2400-base_jit.pt"
 framework: "isaacgym"
 rows: 4
 cols: 3
@@ -33,9 +33,9 @@ hip_scale_reduction_indices: [ 0, 3, 6, 9 ]
 num_of_dofs: 12
 action_scale: 0.25
 
-lin_vel_scale: 2.0
+lin_vel_scale: 1.0
 ang_vel_scale: 0.25
-dof_pos_scale: 1.0
+dof_pos_scale: 0.8
 dof_vel_scale: 0.05
 delta_yaw_scale: 0.25  # 偏航角增量缩放因子
 foot_force_threshold: 30.0
@@ -58,10 +58,11 @@ num_priv_latent: 29  # 隐式 privilige latent（由历史编码得到）
 use_camera: true
 depth_width: 87
 depth_height: 58
-max_depth: 0.5       # 深度裁剪距离（米）
+max_depth: 2.0       # 深度裁剪距离（米），与训练 cfg.depth.far_clip=2 对齐
+depth_buffer_len: 1  # 深度历史帧堆叠长度（训练侧 buffer_len=2）；encoder 若不需要历史可设为 1
 depth_feature_dim: 32   # 与 vision_jit.pt 输出 latent 长度一致（额外 2 维偏航在代码中单独处理）
 use_depth_cnn: true  # 若使用预训练CNN设为true
-depth_cnn_model: "327-22-54-29500-vision_jit.pt"  # 深度编码器使用 camera-policy-v0-10500 导出的 TorchScript 深度模型
-depth_yaw_clip: 0.7      # 深度网络输出 yaw_from_depth 的裁剪绝对值上限（弧度），越小越保守
-depth_yaw_alpha: 0.6    # 深度 yaw 低通滤波系数，越接近 1.0 越慢越平滑
-action_filter_alpha: 0.7 # 策略输出动作的一阶低通滤波系数，越接近 1.0 越平滑但响应越慢
+depth_cnn_model: "learn_vision-01092252-posmamba1-film2-ft-2400-vision_jit.pt"  # 深度编码器使用 camera-policy-v0-10500 导出的 TorchScript 深度模型
+depth_yaw_clip: 1.0      # 深度网络输出 yaw_from_depth 的裁剪绝对值上限（弧度），越小越保守
+depth_yaw_alpha: 0.0    # 深度 yaw 低通滤波系数，越接近 1.0 越慢越平滑
+action_filter_alpha: 0.0 # 策略输出动作的一阶低通滤波系数，越接近 1.0 越平滑但响应越慢

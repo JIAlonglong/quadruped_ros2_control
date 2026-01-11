@@ -6,12 +6,14 @@ Panels:
       Expanded:
         - /Global Options1
         - /Status1
-        - /RobotModel1
         - /Grid1
+        - /RobotModel1
         - /Camera1
         - /DepthCloud1
+        - /DepthImage1
+        - /DepthImage1/Topic1
       Splitter Ratio: 0.5
-    Tree Height: 301
+    Tree Height: 482
   - Class: rviz_common/Selection
     Name: Selection
   - Class: rviz_common/Tool Properties
@@ -29,7 +31,7 @@ Panels:
     Experimental: false
     Name: Time
     SyncMode: 0
-    SyncSource: ""
+    SyncSource: DepthCloud
 Visualization Manager:
   Class: ""
   Displays:
@@ -154,11 +156,20 @@ Visualization Manager:
           Show Axes: false
           Show Trail: false
           Value: true
+        camera_d435:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
         imu_link:
           Alpha: 1
           Show Axes: false
           Show Trail: false
           Value: true
+        lidar:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
         trunk:
           Alpha: 1
           Show Axes: false
@@ -172,36 +183,34 @@ Visualization Manager:
       Update Interval: 0
       Value: true
       Visual Enabled: true
-    - Alpha: 1
-      Class: rviz_default_plugins/Camera
-      Camera Info Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /rgbd_d435/camera_info
-      Enabled: true
+    - Class: rviz_default_plugins/Camera
+      Enabled: false
+      Far Plane Distance: 100
       Image Rendering: background and overlay
-      Image Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /rgbd_d435/image
       Name: Camera
       Overlay Alpha: 0.5
-      Queue Size: 2
-      Transport Hints: 
-      Unreliable: false
-      Value: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: ""
+      Value: false
+      Visibility:
+        DepthCloud: true
+        DepthImage: true
+        Grid: true
+        RobotModel: true
+        Value: true
+      Zoom Factor: 1
     - Alpha: 1
       Autocompute Intensity Bounds: true
-      Autocompute Value Bounds: true
-      Auto Size: false
-      Axes Length: 1
-      Axes Radius: 0.10000000149011612
+      Autocompute Value Bounds:
+        Max Value: 0.1832275092601776
+        Min Value: -0.40895596146583557
+        Value: true
       Axis: Z
-      Background Alpha: 0
+      Channel Name: intensity
       Class: rviz_default_plugins/PointCloud2
       Color: 255; 255; 255
       Color Transformer: AxisColor
@@ -210,13 +219,10 @@ Visualization Manager:
       Invert Rainbow: false
       Max Color: 255; 255; 255
       Max Intensity: 4096
-      Max Value: 2.0
       Min Color: 0; 0; 0
       Min Intensity: 0
-      Min Value: 0.0
       Name: DepthCloud
       Position Transformer: XYZ
-      Queue Size: 2
       Selectable: true
       Size (Pixels): 5
       Size (m): 0.009999999776482582
@@ -224,42 +230,26 @@ Visualization Manager:
       Topic:
         Depth: 5
         Durability Policy: Volatile
+        Filter size: 10
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /rgbd_d435/points
-      Unreliable: false
       Use Fixed Frame: true
       Use rainbow: true
       Value: true
-    - Alpha: 1
-      Class: rviz_default_plugins/Image
-      Camera Info Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /rgbd_d435/camera_info
+    - Class: rviz_default_plugins/Image
       Enabled: true
-      Image Rendering: background and overlay
-      Image Topic:
+      Max Value: 2
+      Median window: 5
+      Min Value: 0.10000000149011612
+      Name: DepthImage
+      Normalize Range: true
+      Topic:
         Depth: 5
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /rgbd_d435/depth_image
-      # 深度图显示参数：
-      # - 话题为 32FC1（float32，单位米），直接显示很容易“全黑”
-      # - 这里固定显示范围到 0.1~2.0m，与策略 max_depth=2.0 对齐
-      # 注意：不同 RViz2 版本字段名可能略有差异；若你在 GUI 里又手调了范围，
-      #       建议再 Save Config 覆盖一次，确保最终以 GUI 为准。
-      Normalize Range: true
-      Min Value: 0.1
-      Max Value: 2.0
-      Name: DepthImage
-      Overlay Alpha: 0.5
-      Queue Size: 2
-      Transport Hints: 
-      Unreliable: false
+        Value: /depth_image/processed
       Value: true
   Enabled: true
   Global Options:
@@ -328,12 +318,16 @@ Visualization Manager:
       Yaw: 0.8203961253166199
     Saved: ~
 Window Geometry:
+  Camera:
+    collapsed: false
+  DepthImage:
+    collapsed: false
   Displays:
-    collapsed: true
-  Height: 593
-  Hide Left Dock: true
+    collapsed: false
+  Height: 999
+  Hide Left Dock: false
   Hide Right Dock: true
-  QMainWindow State: 000000ff00000000fd0000000400000000000001f40000043cfc0200000008fb0000001200530065006c0065006300740069006f006e00000001e10000009b0000005d00fffffffb0000001e0054006f006f006c002000500072006f007000650072007400690065007302000001ed000001df00000185000000a3fb000000120056006900650077007300200054006f006f02000001df000002110000018500000122fb000000200054006f006f006c002000500072006f0070006500720074006900650073003203000002880000011d000002210000017afb000000100044006900730070006c00610079007300000000700000043c000000cc00fffffffb0000002000730065006c0065006300740069006f006e00200062007500660066006500720200000138000000aa0000023a00000294fb00000014005700690064006500530074006500720065006f02000000e6000000d2000003ee0000030bfb0000000c004b0069006e0065006300740200000186000001060000030c00000261000000010000015d0000043cfc0200000003fb0000001e0054006f006f006c002000500072006f00700065007200740069006500730100000041000000780000000000000000fb0000000a0056006900650077007300000000700000043c000000a900fffffffb0000001200530065006c0065006300740069006f006e010000025a000000b200000000000000000000000200000490000000a9fc0100000001fb0000000a00560069006500770073030000004e00000080000002e10000019700000003000002720000005efc0100000002fb0000000800540069006d00650100000000000002720000026f00fffffffb0000000800540069006d00650100000000000004500000000000000000000002720000018f00000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  QMainWindow State: 000000ff00000000fd0000000400000000000001f40000032dfc020000000afb0000001200530065006c0065006300740069006f006e00000001e10000009b0000005c00fffffffb0000001e0054006f006f006c002000500072006f007000650072007400690065007302000001ed000001fe00000185000000a3fb000000120056006900650077007300200054006f006f02000001df000002110000018500000122fb000000200054006f006f006c002000500072006f0070006500720074006900650073003203000002880000011d000002210000017afb000000100044006900730070006c006100790073010000003b000002a7000000c700fffffffb0000002000730065006c0065006300740069006f006e00200062007500660066006500720200000138000000aa0000023a00000294fb00000014005700690064006500530074006500720065006f02000000e6000000d2000003ee0000030bfb0000000c004b0069006e0065006300740200000186000001060000030c00000261fb00000014004400650070007400680049006d00610067006501000002e8000000800000002800fffffffb0000000c00430061006d00650072006100000002fd0000006b0000002800ffffff000000010000015d0000043cfc0200000003fb0000001e0054006f006f006c002000500072006f00700065007200740069006500730100000041000000780000000000000000fb0000000a0056006900650077007300000000700000043c000000a000fffffffb0000001200530065006c0065006300740069006f006e010000025a000000b200000000000000000000000200000490000000a9fc0100000001fb0000000a00560069006500770073030000004e00000080000002e10000019700000003000007740000005efc0100000002fb0000000800540069006d00650100000000000007740000025300fffffffb0000000800540069006d006501000000000000045000000000000000000000057a0000032d00000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
   Selection:
     collapsed: false
   Time:
@@ -342,6 +336,6 @@ Window Geometry:
     collapsed: false
   Views:
     collapsed: true
-  Width: 626
-  X: 635
-  Y: 1328
+  Width: 1908
+  X: 0
+  Y: 510
