@@ -55,8 +55,7 @@ def generate_launch_description():
     world_file = PathJoinSubstitution(
         [FindPackageShare(package_description), "worlds", LaunchConfiguration("world")]
     )
-    camera_pitch_deg = random.uniform(-5.0, 5.0)
-    camera_pitch_rad = math.radians(camera_pitch_deg)
+    camera_pitch_rad = 0.30
     robot_description = process_xacro(camera_pitch_rad)
 
     # 通过 ros_gz_sim 的 create 可执行程序，把 robot_description 里的模型生成到 Gazebo

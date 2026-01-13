@@ -2,18 +2,33 @@
 // Created by jialong on 25-9-2.
 //
 
-// 本文件实现 RL 控制状态（StateRL）。
-// 该状态在每个控制周期中完成：
-// 1) 从 ros2_control 的 state_interface 读取 IMU / 关节状态 / 遥控输入；
-// 2) 按训练时约定拼接观测（proprio + 可选 depth latent + 历史）；
-// 3) 调用 TorchScript 策略网络推理得到动作（actions）；
-// 4) 将动作映射为目标关节位置/增益，并写入 ros2_control 的 command_interface。
+// 本文件实现 RL 控制状态（StateRL）
 //
-// 代码同时兼容“主线程推理”和“独立 RL 线程推理”两种模式，后者用于降低 update() 的计算开销。
+// 功能概述：
+// - 每个控制周期完成：读取状态 -> 构建观测 -> 策略推理 -> 映射动作 -> 写入指令
+// - 观测包含：IMU、遥控、关节位置/速度、上一时刻动作、足接触、可选深度特征与历史
+// - 策略为 TorchScript 导出模型；可选加载深度编码器以融合环境几何信息
+//
+// 数据流：
+// - state_interface 读入 -> robot_state_/control_ 缓存
+// - 观测拼接（proprio + depth_latent + history） -> policy.forward()
+// - 策略输出 actions 经裁剪/缩放/EMA 低通 -> 目标关节角 output_dof_pos_
+// - robot_command_ 写入 command_interface（位置/速度/KP/KD/力矩）
+//
+// 线程模型：
+// - 主线程：getState() +（可选）runModel() + setCommand()
+// - 独立 RL 线程（use_rl_thread_）：按 decimation 降频执行 runModel()，降低主循环算力占用
+//
+// 重要参数：
+// - action_scale/action_filter_alpha：动作缩放与指数滑动平均系数（抑制抖动）
+// - rl_kp/rl_kd/torque_limits：关节增益与力矩上限
+// - clip_actions_[upper/lower]：动作裁剪边界，防止异常输出
+// - use_camera/use_depth_cnn/max_depth 等：深度特征与预处理参数
 
 #include "our_depth_rl_quadruped_controller/FSM/StateRL.h"
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include <rclcpp/logging.hpp>
+#include <sensor_msgs/image_encodings.hpp>
 #include <yaml-cpp/yaml.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>  
 #include <tf2/LinearMath/Quaternion.h>
@@ -147,6 +162,9 @@ StateRL::StateRL(CtrlInterfaces& ctrl_interfaces,
                     if (!msg) {
                         return;
                     }
+                    if (msg->data.empty() || msg->height == 0 || msg->width == 0) {
+                        return;
+                    }
 
                     cv::Mat depth_m;
                     if (msg->encoding == sensor_msgs::image_encodings::TYPE_32FC1 || msg->encoding == "32FC1") {
@@ -158,8 +176,11 @@ StateRL::StateRL(CtrlInterfaces& ctrl_interfaces,
                         RCLCPP_WARN(rclcpp::get_logger("StateRL"), "Unsupported depth image encoding: %s", msg->encoding.c_str());
                         return;
                     }
+                    if (depth_m.empty()) {
+                        return;
+                    }
 
-                    obs_.depth_latent = preprocessDepthImage(msg);
+                    (void)preprocessDepthImage(msg);
 
                     cv::Mat depth_vis = depth_m.clone();
                     cv::medianBlur(depth_vis, depth_vis, 5);
@@ -167,11 +188,25 @@ StateRL::StateRL(CtrlInterfaces& ctrl_interfaces,
                     cv::patchNaNs(depth_vis, far_clip);
                     cv::max(depth_vis, 0.0, depth_vis);
                     cv::min(depth_vis, far_clip, depth_vis);
+                    cv::Mat invalid_mask = depth_vis <= 1e-6f;
+                    depth_vis.setTo(far_clip, invalid_mask);
+
+                    double min_val = 0.0;
+                    double max_val = 0.0;
+                    cv::minMaxLoc(depth_vis, &min_val, &max_val);
+                    const int invalid_count = cv::countNonZero(invalid_mask);
+                    const int total_count = depth_vis.rows * depth_vis.cols;
+                    RCLCPP_INFO_THROTTLE(
+                        rclcpp::get_logger("StateRL"), *node_->get_clock(), 2000,
+                        "Depth vis stats: min=%.3f max=%.3f far=%.3f invalid=%d/%d enc=%s",
+                        min_val, max_val, far_clip, invalid_count, total_count, msg->encoding.c_str());
 
                     cv_bridge::CvImage img_msg;
                     img_msg.header = msg->header;
-                    img_msg.encoding = sensor_msgs::image_encodings::TYPE_32FC1;
-                    img_msg.image = depth_vis;
+                    img_msg.encoding = sensor_msgs::image_encodings::MONO8;
+                    cv::Mat depth_u8;
+                    depth_vis.convertTo(depth_u8, CV_8U, 255.0f / far_clip);
+                    img_msg.image = depth_u8;
                     depth_image_pub_->publish(*img_msg.toImageMsg());
 
                 } catch (const cv_bridge::Exception& e) {
@@ -362,11 +397,15 @@ void StateRL::exit()
 FSMStateName StateRL::checkChange()
 {
     // FSM 状态切换逻辑：
-    // - 若启用 estimator 且安全检查失败，则立即切换到 PASSIVE
+    // - 若启用 estimator 且安全检查失败，则立即切换到 FIXEDSTAND（比 PASSIVE 更不易瞬间瘫倒）
     // - 遥控 command=1/2 可切到 PASSIVE/FIXEDDOWN
     if (enable_estimator_ and !estimator_->safety())
     {
-        return FSMStateName::PASSIVE;
+        // FIXEDSTAND will hold posture with PD gains, preventing sudden collapse.
+        RCLCPP_WARN_THROTTLE(
+            rclcpp::get_logger("StateRL"), *node_->get_clock(), 500,
+            "Estimator safety check failed -> switching RL -> FIXEDSTAND for safety.");
+        return FSMStateName::FIXEDSTAND;
     }
     switch (ctrl_interfaces_.control_inputs_.command)
     {
@@ -426,6 +465,7 @@ void StateRL::loadYaml(const std::string& config_path)
     params_.num_observations = config["num_observations"].as<int>(); // 53或45
     params_.observations = ReadVectorFromYaml<std::string>(config["observations"]);
     params_.clip_obs = config["clip_obs"].as<double>();
+    params_.clip_actions = config["clip_actions"].as<double>(1.2);
     // 动作裁剪上下限：用于防止策略输出异常大导致关节指令过激
     if (config["clip_actions_lower"].IsNull() && config["clip_actions_upper"].IsNull())
     {
@@ -451,7 +491,12 @@ void StateRL::loadYaml(const std::string& config_path)
     params_.dof_pos_scale = config["dof_pos_scale"].as<double>();
     params_.dof_vel_scale = config["dof_vel_scale"].as<double>();
     params_.delta_yaw_scale = config["delta_yaw_scale"].as<double>();
+    params_.forward_command_speed = config["forward_command_speed"].as<double>(0.0);
     params_.foot_force_threshold = config["foot_force_threshold"].as<double>(5.0); // 默认阈值设为5.0N
+
+    // DOF/feet 重排开关（默认 true 以兼容旧部署/仿真；若 ROS 输入已按策略顺序排列则应关闭）
+    params_.reorder_dofs = config["reorder_dofs"].as<bool>(true);
+    params_.reorder_feet = config["reorder_feet"].as<bool>(true);
     
     // 维度参数：用于拼接观测、分配张量形状
     params_.num_feet = config["num_feet"].as<int>(4);  // 默认4足机器人
@@ -540,8 +585,33 @@ void StateRL::loadYaml(const std::string& config_path)
     params_.torque_limits = torch::tensor(
         ReadVectorFromYaml<double>(config["torque_limits"], params_.framework, rows, cols)).view({1, -1});
     
-    // 默认关节角：使用 enter() 传入的 target_pos 初始化，保证与机器人当前默认站立姿态一致
+    // 默认关节角：
+    // - 默认使用 enter() 传入的 stand_pos（init_pos_）初始化
+    // - 若 config.yaml 显式提供 default_dof_pos，则优先使用它（便于与训练端 default_joint_angles 完全对齐/快速扫参）
     params_.default_dof_pos = torch::from_blob(init_pos_, {12}, torch::kDouble).clone().to(torch::kFloat).unsqueeze(0);
+    if (!config["default_dof_pos"].IsNull())
+    {
+        try
+        {
+            auto v = ReadVectorFromYaml<double>(config["default_dof_pos"], params_.framework, rows, cols);
+            if (static_cast<int>(v.size()) == params_.num_of_dofs)
+            {
+                params_.default_dof_pos = torch::tensor(v, torch::kFloat32).view({1, -1});
+                RCLCPP_INFO(rclcpp::get_logger("StateRL"), "Using default_dof_pos from config.yaml");
+            }
+            else
+            {
+                RCLCPP_WARN(
+                    rclcpp::get_logger("StateRL"),
+                    "config.yaml default_dof_pos size=%zu != num_of_dofs=%d, ignore and use stand_pos init.",
+                    v.size(), params_.num_of_dofs);
+            }
+        }
+        catch (const std::exception& e)
+        {
+            RCLCPP_WARN(rclcpp::get_logger("StateRL"), "Failed to parse default_dof_pos from config.yaml: %s", e.what());
+        }
+    }
     
     // params_.default_dof_pos = torch::tensor(
     //     ReadVectorFromYaml<double>(config["default_dof_pos"], params_.framework, rows, cols)).view({1, -1});
@@ -596,10 +666,52 @@ void StateRL::getState()
             robot_state_.motor_state.tauEst[i] = ctrl_interfaces_.joint_effort_state_interface_[i].get().get_value();
         }
 
-        // 遥控输入映射：此处的轴向/正负号与训练脚本的约定有关（需要与 teleop 或手柄节点对齐）
-        control_.x = ctrl_interfaces_.control_inputs_.ly;
-        control_.y = -ctrl_interfaces_.control_inputs_.lx;
-        control_.yaw = -ctrl_interfaces_.control_inputs_.rx;
+        // 遥控输入映射
+        control_.x = 0.0;
+        control_.y = 0.0;
+        control_.yaw = 0.0;
+
+        // 读取里程计线速度
+        double odom_vx = 0.0, odom_vy = 0.0, odom_vz = 0.0;
+        if (ctrl_interfaces_.odom_state_interface_.size() >= 6)
+        {
+            odom_vx = ctrl_interfaces_.odom_state_interface_[3].get().get_value();
+            odom_vy = ctrl_interfaces_.odom_state_interface_[4].get().get_value();
+            odom_vz = ctrl_interfaces_.odom_state_interface_[5].get().get_value();
+        }
+        const auto cpu_f32 = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
+        obs_.lin_vel = torch::tensor({{static_cast<float>(odom_vx),
+                                       static_cast<float>(odom_vy),
+                                       static_cast<float>(odom_vz)}}, cpu_f32);
+
+        // 足力统计
+        if (!ctrl_interfaces_.foot_force_state_interface_.empty())
+        {
+            const int n = std::min<int>(4, ctrl_interfaces_.foot_force_state_interface_.size());
+            for (int i = 0; i < n; ++i)
+            {
+                const double v = ctrl_interfaces_.foot_force_state_interface_[i].get().get_value();
+                if (!foot_force_stats_initialized_)
+                {
+                    foot_force_min_[i] = v;
+                    foot_force_max_[i] = v;
+                }
+                else
+                {
+                    foot_force_min_[i] = std::min(foot_force_min_[i], v);
+                    foot_force_max_[i] = std::max(foot_force_max_[i], v);
+                }
+            }
+            foot_force_stats_initialized_ = true;
+            RCLCPP_INFO_THROTTLE(
+                rclcpp::get_logger("StateRL"), *node_->get_clock(), 2000,
+                "Foot force range [N] FR(%.2f-%.2f) FL(%.2f-%.2f) RR(%.2f-%.2f) RL(%.2f-%.2f), thr=%.2f",
+                foot_force_min_[0], foot_force_max_[0],
+                foot_force_min_[1], foot_force_max_[1],
+                foot_force_min_[2], foot_force_max_[2],
+                foot_force_min_[3], foot_force_max_[3],
+                params_.foot_force_threshold);
+        }
 
         updated_ = true;
     }
@@ -638,12 +750,17 @@ void StateRL::runModel()
 
     try
     {
-        const torch::Tensor dof_reindex = torch::tensor(
-            {3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8},
-            torch::TensorOptions().dtype(torch::kLong).device(device_));
-        const torch::Tensor feet_reindex = torch::tensor(
-            {1, 0, 3, 2},
-            torch::TensorOptions().dtype(torch::kLong).device(device_));
+        const torch::Tensor dof_reindex = params_.reorder_dofs
+            ? torch::tensor(
+                  {3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8},
+                  torch::TensorOptions().dtype(torch::kLong).device(device_))
+            : torch::arange(params_.num_of_dofs, torch::TensorOptions().dtype(torch::kLong).device(device_));
+
+        const torch::Tensor feet_reindex = params_.reorder_feet
+            ? torch::tensor(
+                  {1, 0, 3, 2},
+                  torch::TensorOptions().dtype(torch::kLong).device(device_))
+            : torch::arange(params_.num_feet, torch::TensorOptions().dtype(torch::kLong).device(device_));
 
         // ==================== 1. 构建 proprio 观测（基础本体观测） ====================
         // 这里把 IMU、指令、关节位姿/速度、上一动作、接触估计等拼接成训练时所需的 proprio 向量
@@ -676,27 +793,10 @@ void StateRL::runModel()
         // - yaw_info[2] = delta_next_yaw (set to 0 for now)
         torch::Tensor yaw_info = torch::zeros({1, 3}, options);
 
-        const float lin_vel_deadband = 0.1f;
-        const float cmd_px_max = 0.5f;
-        const float cmd_nx_max = 0.5f;
-
-        float vx = 0.0f;
-        const float ly = static_cast<float>(ctrl_interfaces_.control_inputs_.ly);
-        if (ly > lin_vel_deadband)
-        {
-            vx = (ly - lin_vel_deadband) / (1.0f - lin_vel_deadband);
-            vx = vx * cmd_px_max;
-        }
-        else if (ly < -lin_vel_deadband)
-        {
-            vx = (ly + lin_vel_deadband) / (1.0f - lin_vel_deadband);
-            vx = vx * cmd_nx_max;
-        }
-
-        // training obs_buf uses:
-        // 0*self.commands[:,0:2] (2 dims), self.commands[:,0:1] (1 dim) -> total 3 dims
-        // and puts forward command in the last slot; we follow that convention.
-        torch::Tensor commands = torch::tensor({{0.0f, 0.0f, vx}}, options);
+        // 训练端 obs_buf 中 forward command 直接使用 commands[:,0:1]（未乘 obs_scales.lin_vel）。
+        // 为了对齐训练，这里也不额外乘 lin_vel_scale。
+        const float fwd_cmd = static_cast<float>(params_.forward_command_speed);
+        torch::Tensor commands = torch::tensor({{0.0f, 0.0f, fwd_cmd}}, options);
 
         // training uses two one-hot dims:
         // (env_class != 17), (env_class == 17)
@@ -753,12 +853,16 @@ void StateRL::runModel()
                     ctrl_interfaces_.foot_force_state_interface_.size(),
                     params_.num_feet);
             }
+            // Align with training logic (legged_robot.py):
+            //   contact = norm(contact_forces(feet)) > thr
+            //   contact_filt = contact OR last_contacts
+            // Here we only have a scalar foot force per foot; use a single threshold and
+            // apply the same one-step OR filter to reduce flicker.
+            const float thr = static_cast<float>(params_.foot_force_threshold);
             for (int i = 0; i < n; ++i)
             {
                 const float v = static_cast<float>(ctrl_interfaces_.foot_force_state_interface_[i].get().get_value());
-                const bool contact_now = (v <= 1.5f)
-                    ? (v > 1.0f)
-                    : (v > static_cast<float>(params_.foot_force_threshold));
+                const bool contact_now = (v > thr);
                 contact_bool[0][i] = contact_now;
             }
             if (n < params_.num_feet)
@@ -817,7 +921,8 @@ void StateRL::runModel()
         // 若启用了相机并已加载 depth encoder：把最新深度张量与 proprio 一起输入，得到 depth latent；
         // 同时可从输出末尾取两维 yaw 修正写回 proprio 的 slice（训练时的约定）。
         torch::Tensor depth_latent = torch::zeros({1, params_.depth_feature_dim}, options);
-        if (params_.use_camera && params_.use_depth_cnn && depth_model_loaded_)
+        const bool depth_ok = last_depth_frame_valid_.load();
+        if (params_.use_camera && params_.use_depth_cnn && depth_model_loaded_ && depth_ok)
         {
             try
             {
@@ -876,6 +981,14 @@ void StateRL::runModel()
                 RCLCPP_ERROR(rclcpp::get_logger("StateRL"), "Depth encoder forward failed: %s", e.what());
             }
         }
+        else if (params_.use_camera && params_.use_depth_cnn && depth_model_loaded_ && !depth_ok)
+        {
+            // Depth dropout: do not feed stale depth into recurrent encoder.
+            // Keep depth_latent=zeros and do NOT inject yaw.
+            RCLCPP_WARN_THROTTLE(
+                rclcpp::get_logger("StateRL"), *node_->get_clock(), 1000,
+                "Depth invalid -> skip depth encoder (depth_latent=zeros) for stability.");
+        }
         // 记录 depth_latent（CPU）用于调试/可视化
         obs_.depth_latent = depth_latent.to(torch::kCPU);
 
@@ -906,6 +1019,21 @@ void StateRL::runModel()
         torch::Tensor policy_obs = torch::zeros({1, policy_obs_dim}, options);
         policy_obs.index_put_({torch::indexing::Slice(), torch::indexing::Slice(0, params_.num_proprio)}, proprio);
 
+        if (params_.num_priv_explicit > 0)
+        {
+            const int priv_offset = params_.num_proprio + params_.num_scan;
+            torch::Tensor priv_explicit = torch::zeros({1, params_.num_priv_explicit}, options);
+            torch::Tensor base_lin_vel = obs_.lin_vel.defined()
+                                         ? obs_.lin_vel.to(options)
+                                         : torch::zeros({1, 3}, options);
+            base_lin_vel = base_lin_vel * static_cast<float>(params_.lin_vel_scale);
+            const int copy_dims = std::min(3, params_.num_priv_explicit);
+            priv_explicit.index_put_({torch::indexing::Slice(), torch::indexing::Slice(0, copy_dims)},
+                                     base_lin_vel.index({0, torch::indexing::Slice(0, copy_dims)}).unsqueeze(0));
+            policy_obs.index_put_({torch::indexing::Slice(), torch::indexing::Slice(priv_offset, priv_offset + params_.num_priv_explicit)},
+                                  priv_explicit);
+        }
+
         if (params_.num_hist_len > 0)
         {
             const int history_offset = policy_obs_dim - params_.num_hist_len * params_.num_proprio;
@@ -917,14 +1045,14 @@ void StateRL::runModel()
         policy_inputs.emplace_back(policy_obs);
         policy_inputs.emplace_back(depth_latent);
         torch::Tensor actions = sanitize_tensor(policy_module_.forward(policy_inputs).toTensor().to(device_));
-
+        
+        const float clip_actions = static_cast<float>(params_.clip_actions);
+        const float action_scale_cfg = static_cast<float>(params_.action_scale);
         torch::Tensor actions_clamped = actions;
-        if (params_.clip_actions_upper.numel() == params_.clip_actions_lower.numel() &&
-            params_.clip_actions_upper.numel() == params_.num_of_dofs)
+        if (action_scale_cfg > 1e-6f)
         {
-            actions_clamped = torch::max(
-                torch::min(actions, params_.clip_actions_upper.to(options)),
-                params_.clip_actions_lower.to(options));
+            const float clip_abs = clip_actions / action_scale_cfg;
+            actions_clamped = torch::clamp(actions, -clip_abs, clip_abs);
         }
 
         for (const int index : params_.hip_scale_reduction_indices)
@@ -1146,6 +1274,30 @@ torch::Tensor StateRL::preprocessDepthImage(const sensor_msgs::msg::Image::Share
 
         cv::patchNaNs(depth_m, static_cast<float>(max_depth_m));
 
+        // If the incoming depth frame is mostly invalid (e.g., camera dropout),
+        // do NOT overwrite the cached depth tensor; keep the last good frame.
+        // This avoids sudden jumps to a constant "far" image which can destabilize the recurrent depth encoder.
+        {
+            cv::Mat invalid_mask = depth_m <= 1e-6f;
+            const int invalid_cnt = cv::countNonZero(invalid_mask);
+            const int total_cnt = depth_m.rows * depth_m.cols;
+            const float invalid_ratio = total_cnt > 0 ? static_cast<float>(invalid_cnt) / static_cast<float>(total_cnt) : 1.0f;
+            if (invalid_ratio > 0.98f) {
+                last_depth_frame_valid_.store(false);
+                RCLCPP_WARN_THROTTLE(
+                    rclcpp::get_logger("StateRL"), *node_->get_clock(), 1000,
+                    "Depth frame mostly invalid (%.1f%%). Keeping last cached depth tensor.",
+                    invalid_ratio * 100.0f);
+                std::lock_guard<std::mutex> lock(depth_mutex_);
+                if (latest_depth_tensor_.defined() && latest_depth_tensor_.numel() > 0) {
+                    return latest_depth_tensor_.to(torch::kCPU);
+                }
+                // fallthrough: no cached frame yet
+            } else {
+                last_depth_frame_valid_.store(true);
+            }
+        }
+
         cv::Mat cropped = depth_m;
         if (cropped.rows > 2 && cropped.cols > 8) {
             const cv::Rect roi(4, 0, cropped.cols - 8, cropped.rows - 2);
@@ -1155,22 +1307,23 @@ torch::Tensor StateRL::preprocessDepthImage(const sensor_msgs::msg::Image::Share
         cv::Mat resized;
         cv::resize(cropped, resized, cv::Size(kTargetWidth, kTargetHeight), 0.0, 0.0, cv::INTER_CUBIC);
 
-        // training does:
-        // depth_image = depth_image * -1
-        // depth_image = clip(depth_image, -far, -near)
-        // depth_image = (depth_image - near)/(far-near) - 0.5
+        // training does (see legged_robot.py):
+        //   depth = clip(depth, -far, -near)           # depth is negative here
+        //   depth = depth * -1                         # back to positive
+        //   depth = (depth - near) / (far-near) - 0.5  # -> [-0.5, 0.5]
         //
-        // In ROS, depth is usually positive meters; training expects negative depth before normalization.
+        // In ROS, depth is usually positive meters; training expects negative depth during clipping.
         // Use near=0 and far=max_depth_m (training default near_clip=0, far_clip=cfg.depth.far_clip).
         constexpr float near_clip_m = 0.0f;
         const float far_clip_m = static_cast<float>(max_depth_m);
 
-        // invert
+        // invert to negative for clipping
         resized = resized * -1.0f;
-        // clip to [-far, -near]
+        // clip to [-far, -near] (still negative)
         cv::max(resized, -far_clip_m, resized);
         cv::min(resized, -near_clip_m, resized);
-        // normalize to [-0.5, 0.5] with same formula
+        // invert back to positive, then normalize to [-0.5, 0.5]
+        resized = resized * -1.0f;
         resized = (resized - near_clip_m) / std::max(1e-6f, (far_clip_m - near_clip_m)) - 0.5f;
         
         // 4) 转换为 PyTorch 张量，并添加 batch 维度，得到 [1,H,W]

@@ -12,7 +12,9 @@
 #include <opencv2/core/mat.hpp>        
 #include <cv_bridge/cv_bridge.h>       
 #include <deque>
-#include <mutex>                      
+#include <array>
+#include <mutex>
+#include <atomic>
 #include "controller_common/FSM/FSMState.h"
 
 struct CtrlComponent;
@@ -117,6 +119,7 @@ struct ModelParams
         double dof_pos_scale;
         double dof_vel_scale;
         double delta_yaw_scale;
+        double forward_command_speed;
         double clip_obs;
         double clip_actions; // 动作裁剪范围
         torch::Tensor clip_actions_upper;
@@ -146,6 +149,13 @@ struct ModelParams
         int num_scan;         // 深度/scan 特征维度
         int num_priv_explicit;// 显式 privileged 观测维度
         int num_priv_latent;  // 历史编码后的 latent 维度
+
+        // ====== ordering / reindexing ======
+        // 训练端（IsaacGym）通常需要把 sim 的 DOF/feet 顺序 reindex 成策略约定顺序。
+        // 部署端若 ROS2 控制器已经按策略顺序提供（例如 joints: FL,FR,RL,RR），则需要关闭 reindex，
+        // 否则会“腿对调”，常见表现就是塌腰/趴着走。
+        bool reorder_dofs = true;
+        bool reorder_feet = true;
 };
 
 struct Observations
@@ -263,6 +273,7 @@ private:
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr depth_image_pub_;
     cv::Mat depth_image_;
     std::mutex depth_mutex_;
+    std::atomic<bool> last_depth_frame_valid_{false};
     torch::Tensor depth_yaw_filtered_;
     bool has_depth_yaw_filtered_ = false;
     torch::Tensor actions_filtered_;
@@ -285,6 +296,10 @@ private:
 	    torch::Tensor latest_depth_tensor_;
 	    std::deque<torch::Tensor> depth_buffer_;       // 最近 N 帧深度（每帧 shape [H,W]）
     torch::Device device_ = torch::kCPU;           // 默认推理设备
+
+    std::array<double, 4> foot_force_min_{0.0, 0.0, 0.0, 0.0};
+    std::array<double, 4> foot_force_max_{0.0, 0.0, 0.0, 0.0};
+    bool foot_force_stats_initialized_{false};
 };
 
 

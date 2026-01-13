@@ -258,12 +258,12 @@
   <xacro:foot_force_sensor name="FR" suffix="foot_fixed"/>
   <xacro:foot_force_sensor name="RR" suffix="foot_fixed"/>
 
-  <xacro:arg name="EXTERNAL_SENSORS" default="false"/>
+  <xacro:arg name="EXTERNAL_SENSORS" default="true"/>
   <xacro:if value="$(arg EXTERNAL_SENSORS)">
     <xacro:include filename="$(find gz_quadruped_playground)/models/D435/model.xacro"/>
 
     <xacro:d435 camID="1" name="d435">
-      <origin rpy="0 $(arg CAMERA_PITCH) 0" xyz="0.24 0 0.12"/>
+      <origin rpy="0 0 0" xyz="0.32 0 0.09"/>
     </xacro:d435>
 
     <gazebo reference="lidar">

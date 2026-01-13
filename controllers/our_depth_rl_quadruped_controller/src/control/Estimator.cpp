@@ -239,11 +239,15 @@ void Estimator::update()
 bool Estimator::safety() const
 {
     Vec3 rpy = rotMatToRPY(rotation_);
-    if (rpy[0] > M_PI_2 or rpy[0] < -M_PI_2)
+    // Align with training termination thresholds in legged_gym (roll/pitch cutoff ~1.5 rad).
+    // Using +/- 90deg (pi/2) here is too strict for real-time estimation noise and can cause
+    // sudden fallback (e.g., RL->PASSIVE) which makes the robot instantly collapse.
+    constexpr double kRPYCutoff = 1.5;
+    if (rpy[0] > kRPYCutoff || rpy[0] < -kRPYCutoff)
     {
         return false;
     }
-    if (rpy[1] > M_PI_2 or rpy[1] < -M_PI_2)
+    if (rpy[1] > kRPYCutoff || rpy[1] < -kRPYCutoff)
     {
         return false;
     }

@@ -1,5 +1,5 @@
 # ===================== 策略主文件配置 =====================
-model_name: "learn_vision-01092252-posmamba1-film2-ft-2400-base_jit.pt"
+model_name: "base_jit.pt"
 framework: "isaacgym"
 rows: 4
 cols: 3
@@ -12,45 +12,62 @@ num_observations: 53  # legacy: 仅作记录，实际观测维度由 num_proprio
 # observations: [ "commands", "ang_vel", "gravity_vec",  "dof_pos", "dof_vel", "actions" ]
 observations_history:  [0,1,2,3,4,5,6,7,8,9]
 clip_obs: 100.0
-clip_actions_lower: [ -100, -100, -100,
-                      -100, -100, -100,
-                      -100, -100, -100,
-                      -100, -100, -100 ]
-clip_actions_upper: [ 100, 100, 100,
-                      100, 100, 100,
-                      100, 100, 100,
-                      100, 100, 100 ]
-rl_kp: [ 20, 20, 20,
-         20, 20, 20,
-         20, 20, 20,
-         20, 20, 20 ]
-rl_kd: [ 1.5, 1.5, 1.5,
-         1.5, 1.5, 1.5,
-         1.5, 1.5, 1.5,
-         1.5, 1.5, 1.5 ]
+clip_actions: 1.2
+forward_command_speed: 0.3
+clip_actions_lower: [ -1.2, -1.2, -1.2,
+                      -1.2, -1.2, -1.2,
+                      -1.2, -1.2, -1.2,
+                      -1.2, -1.2, -1.2 ]
+clip_actions_upper: [ 1.2, 1.2, 1.2,
+                      1.2, 1.2, 1.2,
+                      1.2, 1.2, 1.2,
+                      1.2, 1.2, 1.2 ]
+# RL 控制 PD 增益（Gazebo 下 20/0.5 容易站不起来 -> 先尝试 40/1.0，更接近 go2_original_parkour_config.py）
+rl_kp: [ 40, 40, 40,
+         40, 40, 40,
+         40, 40, 40,
+         40, 40, 40 ]
+rl_kd: [ 1.0, 1.0, 1.0,
+         1.0, 1.0, 1.0,
+         1.0, 1.0, 1.0,
+         1.0, 1.0, 1.0 ]
 hip_scale_reduction: 1.0
 hip_scale_reduction_indices: [ 0, 3, 6, 9 ]
 num_of_dofs: 12
 action_scale: 0.25
 
-lin_vel_scale: 1.0
+# 显式指定训练端 default_joint_angles（优先级高于 robot_control.yaml 的 stand_pos）
+# 顺序需与 controller joints 一致（FL, FR, RL, RR）
+default_dof_pos: [ 0.1, 0.8, -1.5,
+                   -0.1, 0.8, -1.5,
+                   0.1, 1.0, -1.5,
+                   -0.1, 1.0, -1.5 ]
+
+lin_vel_scale: 2.0
 ang_vel_scale: 0.25
-dof_pos_scale: 0.8
+dof_pos_scale: 1.0
 dof_vel_scale: 0.05
 delta_yaw_scale: 0.25  # 偏航角增量缩放因子
-foot_force_threshold: 30.0
+foot_force_threshold: 2.0
 
 commands_scale: [ 2.0, 2.0, 0.25 ]
 
-torque_limits: [ 33.5, 33.5, 33.5,
-                 33.5, 33.5, 33.5,
-                 33.5, 33.5, 33.5,
-                 33.5, 33.5, 33.5 ]
+# ===================== DOF / 足顺序对齐 =====================
+# 训练端（IsaacGym）会对 sim 内部 DOF/feet 顺序做 reindex。
+# 部署端（ROS2）当前 joints/feet_names 已是 FL,FR,RL,RR 顺序（见 robot_control.yaml），
+# 若再 reindex 会把腿对调，导致塌腰/趴着走。
+reorder_dofs: true
+reorder_feet: true
+
+torque_limits: [ 55.5, 55.5, 55.5,
+                 55.5, 55.5, 55.5,
+                 55.5, 55.5, 55.5,
+                 55.5, 55.5, 55.5 ]
 
 # 观测维度配置
 num_proprio: 53       # 基础本体观测（与 Python turn_obs 保持一致）
 num_hist_len: 10     # 历史窗口长度，用于观测缓冲
-num_scan: 132        # 深度特征（scan/latent）维度，结合 vision_jit.pt 输出
+num_scan: 132        # 学生策略部署不需要真实 scan/heights，但 obs 布局仍保留 132 维 scan 段（可填 0）
 num_priv_explicit: 9 # 显式 privilige 观测（保留训练配置）
 num_priv_latent: 29  # 隐式 privilige latent（由历史编码得到）
 
@@ -62,7 +79,7 @@ max_depth: 2.0       # 深度裁剪距离（米），与训练 cfg.depth.far_cli
 depth_buffer_len: 1  # 深度历史帧堆叠长度（训练侧 buffer_len=2）；encoder 若不需要历史可设为 1
 depth_feature_dim: 32   # 与 vision_jit.pt 输出 latent 长度一致（额外 2 维偏航在代码中单独处理）
 use_depth_cnn: true  # 若使用预训练CNN设为true
-depth_cnn_model: "learn_vision-01092252-posmamba1-film2-ft-2400-vision_jit.pt"  # 深度编码器使用 camera-policy-v0-10500 导出的 TorchScript 深度模型
+depth_cnn_model: "vision_jit.pt"  # 深度编码器使用 camera-policy-v0-10500 导出的 TorchScript 深度模型
 depth_yaw_clip: 1.0      # 深度网络输出 yaw_from_depth 的裁剪绝对值上限（弧度），越小越保守
-depth_yaw_alpha: 0.0    # 深度 yaw 低通滤波系数，越接近 1.0 越慢越平滑
-action_filter_alpha: 0.0 # 策略输出动作的一阶低通滤波系数，越接近 1.0 越平滑但响应越慢
+depth_yaw_alpha: 0.6    # 深度 yaw 低通滤波系数，越接近 1.0 越慢越平滑
+action_filter_alpha: 0.85 # 策略输出动作的一阶低通滤波系数，越接近 1.0 越平滑但响应越慢
