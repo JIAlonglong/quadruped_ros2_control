@@ -1,5 +1,7 @@
 <?xml version="1.0"?>
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+  <!-- 供相机安装角度使用；由上层 robot.xacro 传入时会覆盖默认值 -->
+  <xacro:arg name="CAMERA_PITCH" default="0.0"/>
   <xacro:include filename="$(find gz_quadruped_hardware)/xacro/foot_force_sensor.xacro"/>
   <ros2_control name="GazeboSystem" type="system">
     <hardware>
@@ -263,7 +265,7 @@
     <xacro:include filename="$(find gz_quadruped_playground)/models/D435/model.xacro"/>
 
     <xacro:d435 camID="1" name="d435">
-      <origin rpy="0 0 0" xyz="0.32 0 0.09"/>
+      <origin rpy="0 0.4 0" xyz="0.32 0 0.09"/>
     </xacro:d435>
 
     <gazebo reference="lidar">

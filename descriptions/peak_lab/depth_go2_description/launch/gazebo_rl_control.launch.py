@@ -148,16 +148,26 @@ def generate_launch_description():
             '[gz.msgs.CameraInfo',
             '/rgbd_d435/points@sensor_msgs/msg/PointCloud2' +
             '[gz.msgs.PointCloudPacked',
-            '/rgbd_d435/depth_image@sensor_msgs/msg/Image' +
-            '[gz.msgs.Image',
-            '/rgbd_d435/image@sensor_msgs/msg/Image' +
-            '[gz.msgs.Image',
         ],
         output="screen",
         parameters=[
             {'use_sim_time': True},
         ]
         )
+
+    # 用 ros_gz_image 处理图像桥接，避免 depth_image 走 parameter_bridge 出现黑屏/空帧
+    gz_image_bridge_node = Node(
+        package="ros_gz_image",
+        executable="image_bridge",
+        arguments=[
+            '/rgbd_d435/image',
+            '/rgbd_d435/depth_image',
+        ],
+        output="screen",
+        parameters=[
+            {'use_sim_time': True},
+        ],
+    )
 
     # 延迟启动各个 controller spawner：
     # controller_manager / GazeboSystem 有时会在启动早期尚未 ready，直接 spawner 容易失败
@@ -186,6 +196,7 @@ def generate_launch_description():
 
         # 桥接节点建议尽早启动，方便后续节点立即拿到 /clock 与相机话题
         gz_bridge_node,
+        gz_image_bridge_node,
 
         # 启动 Gazebo Sim（通过 include 官方 gz_sim.launch.py）
         IncludeLaunchDescription(

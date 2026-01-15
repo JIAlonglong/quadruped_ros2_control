@@ -118,6 +118,12 @@ struct ModelParams
         double ang_vel_scale;
         double dof_pos_scale;
         double dof_vel_scale;
+    // 足端力顺序重排：ROS 顺序 -> 策略/仿真顺序
+    std::vector<int> feet_reindex;
+    // 关节顺序重排：ROS 顺序 -> 策略/仿真顺序
+    std::vector<int> dof_reindex;
+    // 逆映射：策略/仿真顺序 -> ROS 顺序（下发指令用）
+    std::vector<int> dof_reindex_inv;
         double delta_yaw_scale;
         double forward_command_speed;
         double clip_obs;
@@ -133,6 +139,8 @@ struct ModelParams
         double kd; // 微分增益
         double foot_force_threshold; // 足部接触力阈值
         std::vector<std::vector<double>> dof_pos_limits; // 关节位置限制
+        bool use_onboard_actor_backbone = false; // 使用 onboard 模型推理路径
+        std::string onboard_model_name; // onboard 模型文件名
         // 相机参数
         int depth_width;
         int depth_height;
@@ -146,16 +154,9 @@ struct ModelParams
         // 观测结构
         int num_proprio;      // 基础本体观测维度（turn_obs 中的 proprio）
         int num_hist_len;     // 历史窗口长度
-        int num_scan;         // 深度/scan 特征维度
         int num_priv_explicit;// 显式 privileged 观测维度
         int num_priv_latent;  // 历史编码后的 latent 维度
 
-        // ====== ordering / reindexing ======
-        // 训练端（IsaacGym）通常需要把 sim 的 DOF/feet 顺序 reindex 成策略约定顺序。
-        // 部署端若 ROS2 控制器已经按策略顺序提供（例如 joints: FL,FR,RL,RR），则需要关闭 reindex，
-        // 否则会“腿对调”，常见表现就是塌腰/趴着走。
-        bool reorder_dofs = true;
-        bool reorder_feet = true;
 };
 
 struct Observations
@@ -290,6 +291,9 @@ private:
     // TorchScript modules
     torch::jit::script::Module policy_module_;     // TorchScript 策略网络（camera-policy）
     torch::jit::script::Module depth_encoder_module_; // TorchScript 视觉编码器（vision_jit）
+    torch::jit::script::Module onboard_policy_module_; // TorchScript onboard 策略
+    bool use_onboard_actor_backbone_ = false;
+    bool onboard_model_loaded_ = false;
 	    // 最新缓存的深度图张量（归一化后）：
 	    // - depth_buffer_len == 1: shape [1, H, W]
 	    // - depth_buffer_len  > 1: shape [1, N, H, W]
