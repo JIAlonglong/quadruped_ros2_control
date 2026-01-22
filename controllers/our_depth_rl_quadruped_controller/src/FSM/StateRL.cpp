@@ -29,6 +29,7 @@
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include <rclcpp/logging.hpp>
 #include <sensor_msgs/image_encodings.hpp>
+#include "std_msgs/msg/float32_multi_array.hpp"
 #include <yaml-cpp/yaml.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>  
 #include <tf2/LinearMath/Quaternion.h>
@@ -37,6 +38,8 @@
 #include <numeric>
 #include <algorithm>
 #include <cmath>
+#include <torch/nn/functional.h>
+#include <chrono>
 
 template <typename T>
 std::vector<T> ReadVectorFromYaml(const YAML::Node& node)
@@ -182,15 +185,31 @@ StateRL::StateRL(CtrlInterfaces& ctrl_interfaces,
 
                     (void)preprocessDepthImage(msg);
 
+                    const float far_clip = std::max(1e-6f, static_cast<float>(params_.max_depth));
+                    cv::Mat invalid_mask_raw = depth_m <= 1e-6f;
+                    const int invalid_count_raw = cv::countNonZero(invalid_mask_raw);
+                    const int total_count_raw = depth_m.rows * depth_m.cols;
+                    const float invalid_ratio_raw = total_count_raw > 0
+                                                   ? static_cast<float>(invalid_count_raw) / static_cast<float>(total_count_raw)
+                                                   : 1.0f;
+                    // 深度帧几乎全无效时不更新可视化，避免“黑屏”覆盖上一帧
+                    if (invalid_ratio_raw > 0.98f)
+                    {
+                        RCLCPP_WARN_THROTTLE(
+                            rclcpp::get_logger("StateRL"), *node_->get_clock(), 1000,
+                            "Depth frame mostly invalid (%.1f%%), skip visualization publish.",
+                            invalid_ratio_raw * 100.0f);
+                        return;
+                    }
+
                     cv::Mat depth_vis = depth_m.clone();
                     cv::medianBlur(depth_vis, depth_vis, 5);
-                    const float far_clip = std::max(1e-6f, static_cast<float>(params_.max_depth));
                     cv::patchNaNs(depth_vis, far_clip);
                     cv::max(depth_vis, 0.0, depth_vis);
                     cv::min(depth_vis, far_clip, depth_vis);
                     cv::Mat invalid_mask = depth_vis <= 1e-6f;
-                    // 可视化里把无效值设为 0（黑色），避免整幅图发白
-                    depth_vis.setTo(0.0f, invalid_mask);
+                    // 可视化里把无效值设为 far_clip（白色），便于观察有效区域
+                    depth_vis.setTo(far_clip, invalid_mask);
 
                     double min_val = 0.0;
                     double max_val = 0.0;
@@ -244,6 +263,13 @@ StateRL::StateRL(CtrlInterfaces& ctrl_interfaces,
         );
         
         RCLCPP_INFO(node_->get_logger(), "Depth and RGB camera subscriptions initialized");
+    }
+
+    if (params_.publish_contact_states)
+    {
+        contact_states_pub_ = node_->create_publisher<std_msgs::msg::Float32MultiArray>(
+            params_.contact_states_topic, 10);
+        RCLCPP_INFO(node_->get_logger(), "Contact states publisher: %s", params_.contact_states_topic.c_str());
     }
     // 读取观测维度，默认53
     const int history_obs_dim = params_.num_proprio > 0 ? params_.num_proprio : 53;
@@ -372,6 +398,8 @@ void StateRL::enter()
     last_contact_bool_ = torch::zeros(
         {1, params_.num_feet},
         torch::TensorOptions().dtype(torch::kBool).device(device_));
+    last_depth_latent_ = torch::zeros({1, params_.depth_feature_dim});
+    depth_update_counter_ = 0;
     latest_depth_tensor_ = torch::Tensor();
 
     // 输出缓存：关节目标/力矩等
@@ -645,6 +673,8 @@ void StateRL::loadYaml(const std::string& config_path)
     params_.foot_force_threshold = config["foot_force_threshold"].as<double>(5.0); // 默认阈值设为5.0N
     params_.use_onboard_actor_backbone = config["use_onboard_actor_backbone"].as<bool>(false);
     params_.onboard_model_name = config["onboard_model_name"].as<std::string>("onboard_jit.pt");
+    params_.log_inference_latency = config["log_inference_latency"].as<bool>(false);
+    params_.latency_log_interval_ms = config["latency_log_interval_ms"].as<int>(2000);
 
     // 维度参数已提前设置
 
@@ -663,11 +693,19 @@ void StateRL::loadYaml(const std::string& config_path)
     // 注意：这里的 depth_feature_dim 与训练侧保持一致（Extreme Parkour 里通常是 32 维 latent + 2 维 yaw）
     params_.use_camera = config["use_camera"].as<bool>(false);
     params_.use_depth_cnn = config["use_depth_cnn"].as<bool>(false);
+    params_.publish_contact_states = config["publish_contact_states"].as<bool>(false);
+    params_.contact_states_topic = config["contact_states_topic"].as<std::string>("/our_depth_rl/contact_states");
     if (params_.use_camera)
     {
         params_.depth_width = config["depth_width"].as<int>(58);   // 与 Python 中的 58x87 保持一致
         params_.depth_height = config["depth_height"].as<int>(87);
         params_.max_depth = config["max_depth"].as<double>(2.0);   // 有效深度范围上限
+        params_.depth_crop_top = config["depth_crop_top"].as<int>(0);
+        params_.depth_crop_bottom = config["depth_crop_bottom"].as<int>(0);
+        params_.depth_crop_left = config["depth_crop_left"].as<int>(0);
+        params_.depth_crop_right = config["depth_crop_right"].as<int>(0);
+        params_.depth_update_interval = config["depth_update_interval"].as<int>(1);
+        if (params_.depth_update_interval < 1) params_.depth_update_interval = 1;
         // 深度历史堆叠长度（硬件侧/encoder 可能使用 buffer_len 维度）
         params_.depth_buffer_len = config["depth_buffer_len"].as<int>(1);
         if (params_.depth_buffer_len < 1) params_.depth_buffer_len = 1;
@@ -1024,6 +1062,35 @@ void StateRL::runModel()
             {
                 contact_bool.index_put_({0, torch::indexing::Slice(n, params_.num_feet)}, false);
             }
+
+            // EMA 统计（用于评估 foot_force_threshold 是否合理）
+            const double alpha = 0.1;  // EMA 衰减系数
+            if (!foot_contact_ema_initialized_)
+            {
+                for (int i = 0; i < n; ++i)
+                {
+                    const double v = static_cast<double>(ctrl_interfaces_.foot_force_state_interface_[i].get().get_value());
+                    foot_force_mean_ema_[i] = v;
+                    contact_ratio_ema_[i] = contact_bool[0][i].item<bool>() ? 1.0 : 0.0;
+                }
+                foot_contact_ema_initialized_ = true;
+            }
+            else
+            {
+                for (int i = 0; i < n; ++i)
+                {
+                    const double v = static_cast<double>(ctrl_interfaces_.foot_force_state_interface_[i].get().get_value());
+                    const double contact_val = contact_bool[0][i].item<bool>() ? 1.0 : 0.0;
+                    foot_force_mean_ema_[i] = foot_force_mean_ema_[i] * (1.0 - alpha) + v * alpha;
+                    contact_ratio_ema_[i] = contact_ratio_ema_[i] * (1.0 - alpha) + contact_val * alpha;
+                }
+            }
+            RCLCPP_INFO_THROTTLE(
+                rclcpp::get_logger("StateRL"), *node_->get_clock(), 2000,
+                "Foot force EMA [N] idx0=%.2f idx1=%.2f idx2=%.2f idx3=%.2f | contact ratio idx0=%.2f idx1=%.2f idx2=%.2f idx3=%.2f | thr=%.2f",
+                foot_force_mean_ema_[0], foot_force_mean_ema_[1], foot_force_mean_ema_[2], foot_force_mean_ema_[3],
+                contact_ratio_ema_[0], contact_ratio_ema_[1], contact_ratio_ema_[2], contact_ratio_ema_[3],
+                params_.foot_force_threshold);
         }
 
         if (!last_contact_bool_.defined() || last_contact_bool_.sizes() != contact_bool.sizes())
@@ -1050,6 +1117,16 @@ void StateRL::runModel()
         obs_.pitch = torch::tensor(static_cast<float>(pitch)).unsqueeze(0);
         obs_.delta_yaw = torch::zeros({1}, torch::TensorOptions().dtype(torch::kFloat32));
         obs_.contact_states = contact.to(torch::kCPU);
+        if (params_.publish_contact_states && contact_states_pub_)
+        {
+            std_msgs::msg::Float32MultiArray msg;
+            msg.data.resize(params_.num_feet);
+            for (int i = 0; i < params_.num_feet; ++i)
+            {
+                msg.data[i] = contact[0][i].item<float>();
+            }
+            contact_states_pub_->publish(msg);
+        }
 
         // ==================== training-aligned proprio layout ====================
         // legged_robot.py:
@@ -1072,15 +1149,24 @@ void StateRL::runModel()
             {ang_vel, imu, yaw_info, commands, env_class, joint_pos, joint_vel, last_actions, contact}, 1);
         proprio = sanitize_tensor(proprio.to(device_));
 
+        const auto t_infer_start = std::chrono::steady_clock::now();
         // ==================== 2. 深度特征提取（depth encoder -> depth_latent + yaw） ====================
         // 若启用了相机并已加载 depth encoder：把最新深度张量与 proprio 一起输入，得到 depth latent；
         // 同时可从输出末尾取两维 yaw 修正写回 proprio 的 slice（训练时的约定）。
         torch::Tensor depth_latent = torch::zeros({1, params_.depth_feature_dim}, options);
+        if (last_depth_latent_.defined() && last_depth_latent_.numel() > 0)
+        {
+            depth_latent = last_depth_latent_.to(options);
+        }
         const bool depth_ok = last_depth_frame_valid_.load();
-        if (params_.use_camera && params_.use_depth_cnn && depth_model_loaded_ && depth_ok)
+        depth_update_counter_++;
+        const bool should_update_depth =
+            (depth_update_counter_ % params_.depth_update_interval) == 0;
+        if (params_.use_camera && params_.use_depth_cnn && depth_model_loaded_ && depth_ok && should_update_depth)
         {
             try
             {
+                const auto t_depth_start = std::chrono::steady_clock::now();
                 // 为了线程安全：从共享 latest_depth_tensor_ 中短临界区拷贝一份到本地变量
                 torch::Tensor latest_depth_copy;
                 {
@@ -1164,6 +1250,15 @@ void StateRL::runModel()
                                                  "Depth encoder output shape unexpected.");
                         }
                     }
+                    const auto t_depth_end = std::chrono::steady_clock::now();
+                    if (params_.log_inference_latency)
+                    {
+                        const double depth_ms =
+                            std::chrono::duration<double, std::milli>(t_depth_end - t_depth_start).count();
+                        latency_depth_ms_ema_ = latency_ema_initialized_
+                                                ? (0.9 * latency_depth_ms_ema_ + 0.1 * depth_ms)
+                                                : depth_ms;
+                    }
                 }
             }
             catch (const std::exception& e)
@@ -1181,6 +1276,7 @@ void StateRL::runModel()
         }
         // 记录 depth_latent（CPU）用于调试/可视化
         obs_.depth_latent = depth_latent.to(torch::kCPU);
+        last_depth_latent_ = obs_.depth_latent.clone();
 
         // ==================== 3. 更新历史观测缓存（ObservationBuffer） ====================
         // 把当前 proprio 写入历史环形缓存，再按 observations_history 取出并扁平化
@@ -1199,6 +1295,7 @@ void StateRL::runModel()
         }
         torch::Tensor history_flat = sanitize_tensor(history_obs_buf_->getObsVec(history_indices).to(device_));
 
+        const auto t_policy_start = std::chrono::steady_clock::now();
         torch::Tensor actions;
         if (use_onboard_actor_backbone_ && onboard_model_loaded_)
         {
@@ -1247,6 +1344,15 @@ void StateRL::runModel()
             policy_inputs.emplace_back(depth_latent);
             actions = sanitize_tensor(policy_module_.forward(policy_inputs).toTensor().to(device_));
         }
+        const auto t_policy_end = std::chrono::steady_clock::now();
+        if (params_.log_inference_latency)
+        {
+            const double policy_ms =
+                std::chrono::duration<double, std::milli>(t_policy_end - t_policy_start).count();
+            latency_policy_ms_ema_ = latency_ema_initialized_
+                                     ? (0.9 * latency_policy_ms_ema_ + 0.1 * policy_ms)
+                                     : policy_ms;
+        }
         
         const float clip_actions = static_cast<float>(params_.clip_actions);
         const float action_scale_cfg = static_cast<float>(params_.action_scale);
@@ -1294,6 +1400,22 @@ void StateRL::runModel()
         }
 
         obs_.actions = actions_filtered_.index_select(1, dof_reindex_inv).to(torch::kCPU);
+
+        const auto t_infer_end = std::chrono::steady_clock::now();
+        if (params_.log_inference_latency)
+        {
+            const double total_ms =
+                std::chrono::duration<double, std::milli>(t_infer_end - t_infer_start).count();
+            latency_total_ms_ema_ = latency_ema_initialized_
+                                    ? (0.9 * latency_total_ms_ema_ + 0.1 * total_ms)
+                                    : total_ms;
+            latency_ema_initialized_ = true;
+            const int interval = std::max(500, params_.latency_log_interval_ms);
+            RCLCPP_INFO_THROTTLE(
+                rclcpp::get_logger("StateRL"), *node_->get_clock(), interval,
+                "Inference latency EMA [ms]: total=%.3f policy=%.3f depth=%.3f",
+                latency_total_ms_ema_, latency_policy_ms_ema_, latency_depth_ms_ema_);
+        }
 
         // ==================== 6. 写入电机命令（robot_command_ -> joint interfaces） ====================
         // 这里只写 robot_command_ 缓存；真正写 ros2_control 接口在 setCommand() 完成
@@ -1503,36 +1625,33 @@ torch::Tensor StateRL::preprocessDepthImage(const sensor_msgs::msg::Image::Share
             }
         }
 
+        // 2) 裁剪：对齐 visual_extreme_parkour.py 默认裁剪
+        int top = std::max(0, params_.depth_crop_top);
+        int bottom = std::max(0, params_.depth_crop_bottom);
+        int left = std::max(0, params_.depth_crop_left);
+        int right = std::max(0, params_.depth_crop_right);
         cv::Mat cropped = depth_m;
-        if (cropped.rows > 2 && cropped.cols > 8) {
-            const cv::Rect roi(4, 0, cropped.cols - 8, cropped.rows - 2);
+        if (cropped.rows > top + bottom + 1 && cropped.cols > left + right + 1)
+        {
+            const cv::Rect roi(left, top, cropped.cols - left - right, cropped.rows - top - bottom);
             cropped = cropped(roi);
         }
 
-        cv::Mat resized;
-        cv::resize(cropped, resized, cv::Size(target_width, target_height), 0.0, 0.0, cv::INTER_CUBIC);
+        // 3) clip 到 [0, max_depth] 并归一化到 [0,1]
+        cv::max(cropped, 0.0, cropped);
+        cv::min(cropped, max_depth_m, cropped);
+        cv::Mat normalized = cropped / std::max(1e-6, max_depth_m);
 
-        // training does (see legged_robot.py):
-        //   depth = clip(depth, -far, -near)           # depth is negative here
-        //   depth = depth * -1                         # back to positive
-        //   depth = (depth - near) / (far-near) - 0.5  # -> [-0.5, 0.5]
-        //
-        // In ROS, depth is usually positive meters; training expects negative depth during clipping.
-        // Use near=0 and far=max_depth_m (training default near_clip=0, far_clip=cfg.depth.far_clip).
-        constexpr float near_clip_m = 0.0f;
-        const float far_clip_m = static_cast<float>(max_depth_m);
+        // 4) adaptive_avg_pool2d 到目标分辨率，并减去 0.5
+        torch::Tensor depth_tensor = torch::from_blob(
+            normalized.data, {normalized.rows, normalized.cols}, torch::kFloat32).clone();
+        depth_tensor = depth_tensor.unsqueeze(0);  // [1,H,W]
+        depth_tensor = torch::nn::functional::adaptive_avg_pool2d(
+            depth_tensor,
+            torch::nn::functional::AdaptiveAvgPool2dFuncOptions({target_height, target_width}));
+        depth_tensor = depth_tensor - 0.5f;
 
-        // invert to negative for clipping
-        resized = resized * -1.0f;
-        // clip to [-far, -near] (still negative)
-        cv::max(resized, -far_clip_m, resized);
-        cv::min(resized, -near_clip_m, resized);
-        // invert back to positive, then normalize to [-0.5, 0.5]
-        resized = resized * -1.0f;
-        resized = (resized - near_clip_m) / std::max(1e-6f, (far_clip_m - near_clip_m)) - 0.5f;
-        
-        // 4) 转换为 PyTorch 张量，并添加 batch 维度，得到 [1,H,W]
-        torch::Tensor depth_frame = torch::from_blob(resized.data, {target_height, target_width}, torch::kFloat32).clone();
+        torch::Tensor depth_frame = depth_tensor;
 
         // 缓存归一化后的深度张量（CPU），供 runModel() 在短临界区内拷贝使用
         {

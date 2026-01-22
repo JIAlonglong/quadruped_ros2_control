@@ -16,6 +16,7 @@
 #include <mutex>
 #include <atomic>
 #include "controller_common/FSM/FSMState.h"
+#include "std_msgs/msg/float32_multi_array.hpp"
 
 struct CtrlComponent;
 
@@ -118,6 +119,9 @@ struct ModelParams
         double ang_vel_scale;
         double dof_pos_scale;
         double dof_vel_scale;
+        // 推理延迟日志
+        bool log_inference_latency = false;
+        int latency_log_interval_ms = 2000;
     // 足端力顺序重排：ROS 顺序 -> 策略/仿真顺序
     std::vector<int> feet_reindex;
     // 关节顺序重排：ROS 顺序 -> 策略/仿真顺序
@@ -145,11 +149,31 @@ struct ModelParams
         int depth_width;
         int depth_height;
         double max_depth;
+        int depth_crop_top = 0;
+        int depth_crop_bottom = 0;
+        int depth_crop_left = 0;
+        int depth_crop_right = 0;
+        int depth_update_interval = 1;
         int depth_feature_dim;
         bool use_depth_cnn;
         std::string depth_cnn_model;
         double depth_yaw_clip;
         double depth_yaw_alpha;
+        // 深度预处理/更新频率（对齐 Extreme-Parkour-Onboard）
+        bool depth_preprocess_onboard = false;
+        int depth_update_interval = 1;
+        int depth_crop_top = 0;
+        int depth_crop_bottom = 0;
+        int depth_crop_left = 0;
+        int depth_crop_right = 0;
+        // 深度预处理对齐（裁剪 & 更新间隔）
+        int depth_crop_top = 0;
+        int depth_crop_bottom = 0;
+        int depth_crop_left = 0;
+        int depth_crop_right = 0;
+        int depth_update_interval = 1;
+        bool publish_contact_states = false;
+        std::string contact_states_topic = "/our_depth_rl/contact_states";
 	        int depth_buffer_len;                 // 深度历史帧堆叠长度（encoder 输入用）
         // 观测结构
         int num_proprio;      // 基础本体观测维度（turn_obs 中的 proprio）
@@ -279,12 +303,22 @@ private:
     bool has_depth_yaw_filtered_ = false;
     torch::Tensor actions_filtered_;
     bool has_actions_filtered_ = false;
+    // 深度 latent 复用（按 update_interval 刷新）
+    torch::Tensor last_depth_latent_;
+    bool last_depth_latent_valid_ = false;
+    int depth_update_counter_ = 0;
+    // 推理延迟 EMA
+    bool latency_ema_initialized_ = false;
+    double latency_total_ms_ema_ = 0.0;
+    double latency_depth_ms_ema_ = 0.0;
+    double latency_policy_ms_ema_ = 0.0;
     
     // RGB相机相关
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr rgb_image_sub_;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr rgb_image_pub_;
     cv::Mat rgb_image_;
     std::mutex rgb_mutex_;  // 线程安全锁
+    rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr contact_states_pub_;
 
     std::mutex mtx_;  // 模型加载锁
 
@@ -304,6 +338,10 @@ private:
     std::array<double, 4> foot_force_min_{0.0, 0.0, 0.0, 0.0};
     std::array<double, 4> foot_force_max_{0.0, 0.0, 0.0, 0.0};
     bool foot_force_stats_initialized_{false};
+    // 足端力/接触调试 EMA（按索引顺序打印，避免名称对齐问题）
+    std::array<double, 4> foot_force_mean_ema_{0.0, 0.0, 0.0, 0.0};
+    std::array<double, 4> contact_ratio_ema_{0.0, 0.0, 0.0, 0.0};
+    bool foot_contact_ema_initialized_{false};
 };
 
 
