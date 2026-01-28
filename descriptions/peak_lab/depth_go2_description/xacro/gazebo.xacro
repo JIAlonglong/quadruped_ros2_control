@@ -266,7 +266,7 @@
 
     <xacro:d435 camID="1" name="d435">
       <!-- <origin rpy="0 0.1 0" xyz="0.32 0 0.09"/> -->
-      <origin rpy="0 0.2 0" xyz="0.24 0 0.12"/>
+      <origin rpy="0 0.1 0" xyz="0.24 0 0.12"/>
     </xacro:d435>
 
     <gazebo reference="lidar">

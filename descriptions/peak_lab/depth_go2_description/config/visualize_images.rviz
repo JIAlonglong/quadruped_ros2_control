@@ -31,7 +31,7 @@ Panels:
     Experimental: false
     Name: Time
     SyncMode: 0
-    SyncSource: DepthCloud
+    SyncSource: ""
 Visualization Manager:
   Class: ""
   Displays:
@@ -337,5 +337,5 @@ Window Geometry:
   Views:
     collapsed: true
   Width: 1908
-  X: 5967
-  Y: 414
+  X: 5935
+  Y: 382

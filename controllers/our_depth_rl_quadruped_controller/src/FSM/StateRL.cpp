@@ -271,6 +271,12 @@ StateRL::StateRL(CtrlInterfaces& ctrl_interfaces,
             params_.contact_states_topic, 10);
         RCLCPP_INFO(node_->get_logger(), "Contact states publisher: %s", params_.contact_states_topic.c_str());
     }
+    if (params_.publish_proprio)
+    {
+        proprio_pub_ = node_->create_publisher<std_msgs::msg::Float32MultiArray>(
+            params_.proprio_topic, 10);
+        RCLCPP_INFO(node_->get_logger(), "Proprio publisher: %s", params_.proprio_topic.c_str());
+    }
     // 读取观测维度，默认53
     const int history_obs_dim = params_.num_proprio > 0 ? params_.num_proprio : 53;
     // 读取历史观测长度
@@ -671,8 +677,10 @@ void StateRL::loadYaml(const std::string& config_path)
     params_.delta_yaw_scale = config["delta_yaw_scale"].as<double>();
     params_.forward_command_speed = config["forward_command_speed"].as<double>(0.0);
     params_.foot_force_threshold = config["foot_force_threshold"].as<double>(5.0); // 默认阈值设为5.0N
+    params_.contact_use_last = config["contact_use_last"].as<bool>(false);
     params_.use_onboard_actor_backbone = config["use_onboard_actor_backbone"].as<bool>(false);
     params_.onboard_model_name = config["onboard_model_name"].as<std::string>("onboard_jit.pt");
+    params_.dry_run = config["dry_run"].as<bool>(false);
     params_.log_inference_latency = config["log_inference_latency"].as<bool>(false);
     params_.latency_log_interval_ms = config["latency_log_interval_ms"].as<int>(2000);
 
@@ -683,6 +691,7 @@ void StateRL::loadYaml(const std::string& config_path)
     params_.num_hist_len = config["num_hist_len"].as<int>(10);
     params_.num_priv_explicit = config["num_priv_explicit"].as<int>(0);
     params_.num_priv_latent = config["num_priv_latent"].as<int>(0);
+    params_.direction_mode = config["direction_mode"].as<int>(0); // 默认 0 (自动)
     RCLCPP_INFO(
         rclcpp::get_logger("StateRL"),
         "观测布局配置：proprio=%d, priv_explicit=%d, priv_latent=%d, hist_len=%d",
@@ -695,6 +704,10 @@ void StateRL::loadYaml(const std::string& config_path)
     params_.use_depth_cnn = config["use_depth_cnn"].as<bool>(false);
     params_.publish_contact_states = config["publish_contact_states"].as<bool>(false);
     params_.contact_states_topic = config["contact_states_topic"].as<std::string>("/our_depth_rl/contact_states");
+    params_.publish_proprio = config["publish_proprio"].as<bool>(false);
+    params_.proprio_topic = config["proprio_topic"].as<std::string>("/our_depth_rl/proprio");
+    params_.log_proprio_stats = config["log_proprio_stats"].as<bool>(true);
+    params_.proprio_log_interval_ms = config["proprio_log_interval_ms"].as<int>(2000);
     if (params_.use_camera)
     {
         params_.depth_width = config["depth_width"].as<int>(58);   // 与 Python 中的 58x87 保持一致
@@ -850,9 +863,10 @@ void StateRL::getState()
         }
 
         // 遥控输入映射
-        control_.x = 0.0;
-        control_.y = 0.0;
-        control_.yaw = 0.0;
+        // 从接口读取摇杆值：ly控制前后，lx控制左右平移，rx控制转向
+        control_.x = ctrl_interfaces_.control_inputs_.ly;
+        control_.y = ctrl_interfaces_.control_inputs_.lx;
+        control_.yaw = ctrl_interfaces_.control_inputs_.rx;
 
         // 读取里程计线速度
         double odom_vx = 0.0, odom_vy = 0.0, odom_vz = 0.0;
@@ -1016,6 +1030,20 @@ void StateRL::runModel()
         joint_pos = (joint_pos - default_dof_pos) * static_cast<float>(params_.dof_pos_scale);
         joint_vel = joint_vel * static_cast<float>(params_.dof_vel_scale);
 
+        // 关节分布调试：用于检查关节顺序/尺度是否异常
+        {
+            auto joint_pos_cpu = joint_pos.to(torch::kCPU);
+            auto joint_vel_cpu = joint_vel.to(torch::kCPU);
+            const double pos_mean = joint_pos_cpu.mean().item<double>();
+            const double pos_std = joint_pos_cpu.std(false).item<double>();
+            const double vel_mean = joint_vel_cpu.mean().item<double>();
+            const double vel_std = joint_vel_cpu.std(false).item<double>();
+            RCLCPP_INFO_THROTTLE(
+                rclcpp::get_logger("StateRL"), *node_->get_clock(), 2000,
+                "Joint stats: pos_mean=%.4f pos_std=%.4f vel_mean=%.4f vel_std=%.4f",
+                pos_mean, pos_std, vel_mean, vel_std);
+        }
+
         torch::Tensor last_actions_raw = obs_.actions.numel() == 0
             ? torch::zeros({1, params_.num_of_dofs}, options)
             : sanitize_tensor(obs_.actions.to(options));
@@ -1097,7 +1125,11 @@ void StateRL::runModel()
         {
             last_contact_bool_ = torch::zeros_like(contact_bool);
         }
-        torch::Tensor contact_filt_bool = contact_bool | last_contact_bool_;
+        torch::Tensor contact_filt_bool = contact_bool;
+        if (params_.contact_use_last)
+        {
+            contact_filt_bool = contact_bool | last_contact_bool_;
+        }
         last_contact_bool_ = contact_bool.clone();
 
         torch::Tensor contact_raw = torch::where(
@@ -1148,6 +1180,44 @@ void StateRL::runModel()
         torch::Tensor proprio = torch::cat(
             {ang_vel, imu, yaw_info, commands, env_class, joint_pos, joint_vel, last_actions, contact}, 1);
         proprio = sanitize_tensor(proprio.to(device_));
+        const torch::Tensor proprio_cpu_log = proprio.to(torch::kCPU);
+        if (params_.log_proprio_stats)
+        {
+            const int interval = std::max(500, params_.proprio_log_interval_ms);
+            const int dim = static_cast<int>(proprio_cpu_log.numel());
+            const bool all_finite = torch::isfinite(proprio_cpu_log).all().item<bool>();
+            const double mean = proprio_cpu_log.mean().item<double>();
+            const double std = proprio_cpu_log.std(false).item<double>();
+            const double vmin = proprio_cpu_log.min().item<double>();
+            const double vmax = proprio_cpu_log.max().item<double>();
+            RCLCPP_INFO_THROTTLE(
+                rclcpp::get_logger("StateRL"), *node_->get_clock(), interval,
+                "Proprio stats: dim=%d mean=%.4f std=%.4f min=%.4f max=%.4f finite=%s",
+                dim, mean, std, vmin, vmax, all_finite ? "true" : "false");
+            if (dim != params_.num_proprio)
+            {
+                RCLCPP_WARN_THROTTLE(
+                    rclcpp::get_logger("StateRL"), *node_->get_clock(), interval,
+                    "Proprio dim mismatch: got %d, expected %d", dim, params_.num_proprio);
+            }
+            if (!all_finite)
+            {
+                RCLCPP_WARN_THROTTLE(
+                    rclcpp::get_logger("StateRL"), *node_->get_clock(), interval,
+                    "Proprio contains NaN/Inf values.");
+            }
+        }
+        if (params_.publish_proprio && proprio_pub_)
+        {
+            std_msgs::msg::Float32MultiArray msg;
+            const int dim = static_cast<int>(proprio_cpu_log.numel());
+            msg.data.resize(dim);
+            for (int i = 0; i < dim; ++i)
+            {
+                msg.data[i] = proprio_cpu_log.view({-1})[i].item<float>();
+            }
+            proprio_pub_->publish(msg);
+        }
 
         const auto t_infer_start = std::chrono::steady_clock::now();
         // ==================== 2. 深度特征提取（depth encoder -> depth_latent + yaw） ====================
@@ -1221,25 +1291,33 @@ void StateRL::runModel()
                             depth_output.size(1) >= params_.depth_feature_dim + 2)
                         {
                             depth_latent = depth_output.index({0, torch::indexing::Slice(0, params_.depth_feature_dim)}).unsqueeze(0);
-                            torch::Tensor yaw_from_depth =
-                                sanitize_tensor(depth_output.index({0, torch::indexing::Slice(params_.depth_feature_dim,
-                                                                                             params_.depth_feature_dim + 2)}).unsqueeze(0) * 1.5f);
+                            
+                            torch::Tensor yaw_input;
+                            if (params_.direction_mode == 1) {
+                                // 手动模式：将遥控器转向值映射到观测中 (乘以 scale 缩放)
+                                float manual_yaw = static_cast<float>(control_.yaw * params_.delta_yaw_scale);
+                                yaw_input = torch::tensor({{manual_yaw, manual_yaw}}, options);
+                            } else {
+                                // 自动模式：使用深度网络原始输出
+                                yaw_input = sanitize_tensor(depth_output.index({0, torch::indexing::Slice(params_.depth_feature_dim,
+                                                                                              params_.depth_feature_dim + 2)}).unsqueeze(0) * 1.5f);
+                            }
 
                             const float yaw_clip = static_cast<float>(params_.depth_yaw_clip);
-                            yaw_from_depth = torch::clamp(yaw_from_depth, -yaw_clip, yaw_clip);
+                            yaw_input = torch::clamp(yaw_input, -yaw_clip, yaw_clip);
 
                             const float alpha = static_cast<float>(params_.depth_yaw_alpha);
                             if (!has_depth_yaw_filtered_ ||
                                 !depth_yaw_filtered_.defined() ||
-                                depth_yaw_filtered_.sizes() != yaw_from_depth.sizes())
+                                depth_yaw_filtered_.sizes() != yaw_input.sizes())
                             {
-                                depth_yaw_filtered_ = yaw_from_depth.clone();
+                                depth_yaw_filtered_ = yaw_input.clone();
                                 has_depth_yaw_filtered_ = true;
                             }
                             else
                             {
                                 depth_yaw_filtered_ = depth_yaw_filtered_ * alpha +
-                                                      yaw_from_depth * (1.0f - alpha);
+                                                      yaw_input * (1.0f - alpha);
                             }
 
                             proprio.index_put_({torch::indexing::Slice(), torch::indexing::Slice(6, 8)}, depth_yaw_filtered_);
@@ -1442,6 +1520,15 @@ void StateRL::setCommand() const
     // 将 robot_command_ 写入 ros2_control 的 command interfaces。
     // 为了提高鲁棒性，这里对接口数组大小做边界检查，并对每个关节 set_value() 做异常捕获。
     try {
+        if (params_.dry_run)
+        {
+            RCLCPP_WARN_THROTTLE(
+                rclcpp::get_logger("StateRL"),
+                *node_->get_clock(),
+                2000,
+                "dry_run enabled: skip sending motor commands (inference only)");
+            return;
+        }
         if (static_cast<int>(ctrl_interfaces_.joint_position_command_interface_.size()) < params_.num_of_dofs ||
             static_cast<int>(ctrl_interfaces_.joint_velocity_command_interface_.size()) < params_.num_of_dofs ||
             static_cast<int>(ctrl_interfaces_.joint_kp_command_interface_.size()) < params_.num_of_dofs ||

@@ -1,11 +1,12 @@
 # ===================== 策略主文件配置 =====================
-model_name: "base_jit.pt"
+model_name: "baseline-student-01251800-24500-base_jit.pt"
 framework: "isaacgym"
 rows: 4
 cols: 3
 decimation: 4
 
 # ===================== 观测/动作参数（遗留字段，仅保留兼容） =====================
+direction_mode: 0 # 方向控制模式：0-策略自动，1-遥控器手动
 # 训练脚本中曾使用 num_observations 标识基础观测维度，当前 C++ 控制器已不再读取该值
 num_observations: 53  # legacy: 仅作记录，实际观测维度由 num_proprio + 历史/深度特征计算得到
 # observations 字段为原脚本中的观测名列表，保留以便对照训练配置，控制器不再消费
@@ -13,7 +14,7 @@ num_observations: 53  # legacy: 仅作记录，实际观测维度由 num_proprio
 observations_history:  [0,1,2,3,4,5,6,7,8,9]
 clip_obs: 100.0
 clip_actions: 1.2
-forward_command_speed: 0.3
+forward_command_speed: 0.5
 clip_actions_lower: [ -1.2, -1.2, -1.2,
                       -1.2, -1.2, -1.2,
                       -1.2, -1.2, -1.2,
@@ -51,14 +52,15 @@ default_dof_pos: [ 0.1, 0.8, -1.5,
                    0.1, 1.0, -1.5,
                    -0.1, 1.0, -1.5 ]
 
-lin_vel_scale: 0.5
-ang_vel_scale: 0.1
+lin_vel_scale: 2.0
+ang_vel_scale: 0.25
 dof_pos_scale: 1.0
 dof_vel_scale: 0.05
 delta_yaw_scale: 0.25  # 偏航角增量缩放因子
-foot_force_threshold: 30.0
+foot_force_threshold: 25.0
+contact_use_last: false
 
-commands_scale: [ 2.0, 2.0, 0.25 ]
+commands_scale: [ 0.3, 0.3, 0.05 ]
 
 torque_limits: [ 40.0, 40.0, 40.0,
                  40.0, 40.0, 40.0,
@@ -80,7 +82,7 @@ max_depth: 2.0       # 深度裁剪距离（米），对齐 onboard depth_range=
 depth_buffer_len: 1  # 深度历史帧堆叠长度（onboard 输入单帧）
 depth_feature_dim: 32   # 与 vision_jit.pt 输出 latent 长度一致（额外 2 维偏航在代码中单独处理）
 use_depth_cnn: true  # 若使用预训练CNN设为true
-depth_cnn_model: "vision_jit.pt"  # 深度编码器使用 camera-policy-v0-10500 导出的 TorchScript 深度模型
+depth_cnn_model: "baseline-student-01251800-24500-vision_jit.pt"  # 深度编码器使用 camera-policy-v0-10500 导出的 TorchScript 深度模型
 depth_yaw_clip: 1.0      # 深度网络输出 yaw_from_depth 的裁剪绝对值上限（弧度），越小越保守
 depth_yaw_alpha: 0.0    # 深度 yaw 低通滤波系数，越接近 1.0 越慢越平滑
 depth_crop_top: 60
@@ -91,9 +93,14 @@ depth_update_interval: 5
 action_filter_alpha: 0.0 # 策略输出动作的一阶低通滤波系数，越接近 1.0 越平滑但响应越慢
 use_onboard_actor_backbone: false  # 需配合 onboard_jit 使用
 onboard_model_name: "our_student-9500-onboard_jit.pt"  # 由 save_jit.py 导出的 onboard 模型文件名
+dry_run: false  # 仅推理/不下发电机指令（实机对齐检查）
 # 推理延迟统计（边缘端）
 log_inference_latency: true
 latency_log_interval_ms: 2000
 # 足端接触可视化（绘图用）
 publish_contact_states: true
 contact_states_topic: "/our_depth_rl/contact_states"
+publish_proprio: true
+proprio_topic: "/our_depth_rl/proprio"
+log_proprio_stats: true
+proprio_log_interval_ms: 2000

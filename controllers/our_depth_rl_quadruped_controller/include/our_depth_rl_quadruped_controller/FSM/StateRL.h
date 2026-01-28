@@ -142,9 +142,11 @@ struct ModelParams
         double kp; // 比例增益
         double kd; // 微分增益
         double foot_force_threshold; // 足部接触力阈值
+        bool contact_use_last = false; // 是否与上一帧接触取 OR（对齐 onboard 默认为 false）
         std::vector<std::vector<double>> dof_pos_limits; // 关节位置限制
         bool use_onboard_actor_backbone = false; // 使用 onboard 模型推理路径
         std::string onboard_model_name; // onboard 模型文件名
+        bool dry_run = false; // 仅推理/不下发电机指令（实机对齐检查）
         // 相机参数
         int depth_width;
         int depth_height;
@@ -161,25 +163,19 @@ struct ModelParams
         double depth_yaw_alpha;
         // 深度预处理/更新频率（对齐 Extreme-Parkour-Onboard）
         bool depth_preprocess_onboard = false;
-        int depth_update_interval = 1;
-        int depth_crop_top = 0;
-        int depth_crop_bottom = 0;
-        int depth_crop_left = 0;
-        int depth_crop_right = 0;
-        // 深度预处理对齐（裁剪 & 更新间隔）
-        int depth_crop_top = 0;
-        int depth_crop_bottom = 0;
-        int depth_crop_left = 0;
-        int depth_crop_right = 0;
-        int depth_update_interval = 1;
         bool publish_contact_states = false;
         std::string contact_states_topic = "/our_depth_rl/contact_states";
+        bool publish_proprio = false;
+        std::string proprio_topic = "/our_depth_rl/proprio";
+        bool log_proprio_stats = true;
+        int proprio_log_interval_ms = 2000;
 	        int depth_buffer_len;                 // 深度历史帧堆叠长度（encoder 输入用）
         // 观测结构
         int num_proprio;      // 基础本体观测维度（turn_obs 中的 proprio）
         int num_hist_len;     // 历史窗口长度
         int num_priv_explicit;// 显式 privileged 观测维度
         int num_priv_latent;  // 历史编码后的 latent 维度
+        int direction_mode;   // 方向控制模式：0-策略自动，1-遥控器手动
 
 };
 
@@ -319,6 +315,7 @@ private:
     cv::Mat rgb_image_;
     std::mutex rgb_mutex_;  // 线程安全锁
     rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr contact_states_pub_;
+    rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr proprio_pub_;
 
     std::mutex mtx_;  // 模型加载锁
 
