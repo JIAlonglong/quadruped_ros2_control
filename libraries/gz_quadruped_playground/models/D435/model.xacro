@@ -36,7 +36,8 @@
     <gazebo reference="camera_${name}">
       <sensor name="realsense_d435" type="rgbd_camera">
         <camera name="d435">
-          <horizontal_fov>1.0472</horizontal_fov>
+          <!-- 与训练端 legged_robot_config.py depth.horizontal_fov=87° 对齐；原值 1.0472(60°) 视野过窄 -->
+          <horizontal_fov>1.518</horizontal_fov>
           <lens>
             <intrinsics>
               <fx>554.25469</fx>

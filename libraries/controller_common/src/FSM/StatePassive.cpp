@@ -46,9 +46,14 @@ void StatePassive::exit()
 
 FSMStateName StatePassive::checkChange()
 {
-    if (ctrl_interfaces_.control_inputs_.command == 2)
+    switch (ctrl_interfaces_.control_inputs_.command)
     {
+    case 2:
         return FSMStateName::FIXEDDOWN;
+    case 3:
+        // 直接进入 RL 策略控制（键盘 J/L 控制 yaw 等仅在 RL 状态生效）
+        return FSMStateName::RL;
+    default:
+        return FSMStateName::PASSIVE;
     }
-    return FSMStateName::PASSIVE;
 }

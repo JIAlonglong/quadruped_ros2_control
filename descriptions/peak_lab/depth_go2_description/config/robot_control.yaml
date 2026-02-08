@@ -241,6 +241,8 @@ depth_rl_quadruped_controller:
 
 our_depth_rl_quadruped_controller:
   ros__parameters:
+    # RL 线程策略频率 = update_rate / decimation = 200/4 = 50Hz → 20ms 步长（与训练 sim.dt*decimation=0.005*4=0.02s 一致）
+    # 注意：此 update_rate 被读入 ctrl_interfaces_.frequency_，用于 executeAndSleep 定时
     update_rate: 200  # Hz
     robot_pkg: "depth_go2_description"
     use_rl_thread: true

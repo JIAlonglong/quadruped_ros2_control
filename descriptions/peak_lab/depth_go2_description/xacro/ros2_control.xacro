@@ -5,8 +5,9 @@
 
 		<hardware>
 			<plugin>hardware_unitree_sdk2/HardwareUnitree</plugin>
+			<!-- DDS：与实机一致。domain 通常 0 或 1；network_interface 为本机连机器人的网卡（ifconfig 查看），如 eth0、eth6 -->
 			<param name="domain">0</param>
-			<param name="network_interface">eth2</param>
+			<param name="network_interface">eth0</param>
 			<param name="show_foot_force">false</param>
 		</hardware>
 
@@ -167,11 +168,12 @@
 			<state_interface name="linear_acceleration.z"/>
 		</sensor>
 
+		<!-- 与 gazebo.xacro 一致：FL_foot_force 等，保证仿真/实机共用同一套 robot_control.yaml -->
 		<sensor name="foot_force">
-			<state_interface name="FR"/>
-			<state_interface name="FL"/>
-			<state_interface name="RR"/>
-			<state_interface name="RL"/>
+			<state_interface name="FR_foot_force"/>
+			<state_interface name="FL_foot_force"/>
+			<state_interface name="RR_foot_force"/>
+			<state_interface name="RL_foot_force"/>
 		</sensor>
 
 		<sensor name="odometer">

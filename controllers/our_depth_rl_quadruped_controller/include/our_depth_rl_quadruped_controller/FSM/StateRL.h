@@ -15,6 +15,7 @@
 #include <array>
 #include <mutex>
 #include <atomic>
+#include <functional>
 #include "controller_common/FSM/FSMState.h"
 #include "std_msgs/msg/float32_multi_array.hpp"
 
@@ -119,9 +120,12 @@ struct ModelParams
         double ang_vel_scale;
         double dof_pos_scale;
         double dof_vel_scale;
+        double dof_vel_filter_alpha;  // 关节速度低通滤波：v_filt = alpha*v_raw + (1-alpha)*v_prev，0=关闭，实机建议 0.2~0.5
         // 推理延迟日志
         bool log_inference_latency = false;
         int latency_log_interval_ms = 2000;
+        double control_step_ms = 20.0;  // 策略控制步长(ms)=1000*decimation/update_rate，训练 decimation=4、update_rate=200 时为 20
+        std::string latency_log_file;   // 非空则追加写入：timestamp_sec,latency_ema_ms,under_step(1/0)
     // 足端力顺序重排：ROS 顺序 -> 策略/仿真顺序
     std::vector<int> feet_reindex;
     // 关节顺序重排：ROS 顺序 -> 策略/仿真顺序
@@ -130,6 +134,8 @@ struct ModelParams
     std::vector<int> dof_reindex_inv;
         double delta_yaw_scale;
         double forward_command_speed;
+        double lin_vel_x_min;  // 前向速度指令范围 [min, max]，键盘 ly 映射到此
+        double lin_vel_x_max;
         double clip_obs;
         double clip_actions; // 动作裁剪范围
         torch::Tensor clip_actions_upper;
@@ -147,6 +153,7 @@ struct ModelParams
         bool use_onboard_actor_backbone = false; // 使用 onboard 模型推理路径
         std::string onboard_model_name; // onboard 模型文件名
         bool dry_run = false; // 仅推理/不下发电机指令（实机对齐检查）
+        int warm_up_steps = 2; // 冷启动：前 N 步仅推理不写指令（与 Extreme-Parkour-Onboard warm_up 一致），之后按 dry_run 决定
         // 相机参数
         int depth_width;
         int depth_height;
@@ -165,13 +172,24 @@ struct ModelParams
         bool depth_preprocess_onboard = false;
         bool publish_contact_states = false;
         std::string contact_states_topic = "/our_depth_rl/contact_states";
+        bool publish_foot_force_debug = false;
+        std::string foot_force_debug_topic = "/our_depth_rl/foot_force_debug";
         bool publish_proprio = false;
         std::string proprio_topic = "/our_depth_rl/proprio";
         bool log_proprio_stats = true;
         int proprio_log_interval_ms = 2000;
+        bool publish_yaw_diff = false;
+        std::string yaw_diff_topic = "/our_depth_rl/yaw_diff";
+        /// 若为 true，每步发布 history 各段均值到 history_order_debug_topic，用于检验顺序 [最旧,…,最新]
+        bool publish_history_order_debug = false;
+        std::string history_order_debug_topic = "/our_depth_rl/history_order_debug";
+        /// 若为 true，每次 runModel 后发布 [实际步长ms, 期望步长ms] 到 obs_freq_debug_topic，用于与训练频率对齐（训练 sim.dt*decimation=20ms）
+        bool publish_obs_freq_debug = false;
+        std::string obs_freq_debug_topic = "/our_depth_rl/obs_freq_debug";
 	        int depth_buffer_len;                 // 深度历史帧堆叠长度（encoder 输入用）
-        // 观测结构
+        // 观测结构（与 save_jit.py 导出的 obs 布局一致）
         int num_proprio;      // 基础本体观测维度（turn_obs 中的 proprio）
+        int num_scan;         // scan/heights 维度，导出 base_jit 时为 132，部署无地形则填 0
         int num_hist_len;     // 历史窗口长度
         int num_priv_explicit;// 显式 privileged 观测维度
         int num_priv_latent;  // 历史编码后的 latent 维度
@@ -213,6 +231,19 @@ struct Observations
     torch::Tensor depth_latent;    // 深度图像特征，形状 [N, D]（D为深度特征维度）
 };
 
+// runModel() 内部使用的重排张量与 proprio 构建结果，仅用于拆分可读性
+struct RunModelReindex
+{
+    torch::Tensor dof_reindex;
+    torch::Tensor dof_reindex_inv;
+    torch::Tensor feet_reindex;
+};
+struct RunModelProprioResult
+{
+    torch::Tensor proprio;
+    torch::Tensor default_dof_pos_reindexed;
+};
+
 class StateRL final : public FSMState
 {
 public:
@@ -249,7 +280,32 @@ private:
     // 运行模型
     void runModel();
 
-    void setCommand() const;
+    void setCommand();
+
+    // runModel() 拆出的子步骤，保持功能不变、仅提升可读性
+    void publishObsFreqDebug();
+    RunModelReindex buildReindexTensors();
+    RunModelProprioResult buildProprio(const RunModelReindex& reindex,
+                                       const torch::TensorOptions& options,
+                                       const std::function<torch::Tensor(const torch::Tensor&)>& sanitize);
+    torch::Tensor updateDepthLatentAndYaw(torch::Tensor& proprio_inout,
+                                          const torch::TensorOptions& options,
+                                          const std::function<torch::Tensor(const torch::Tensor&)>& sanitize);
+    torch::Tensor getHistoryFlatAndUpdate(const torch::Tensor& proprio,
+                                          const torch::TensorOptions& options,
+                                          const std::function<torch::Tensor(const torch::Tensor&)>& sanitize);
+    torch::Tensor runPolicyForward(const torch::Tensor& proprio,
+                                  const torch::Tensor& history_flat,
+                                  const torch::Tensor& depth_latent,
+                                  const torch::TensorOptions& options,
+                                  const std::function<torch::Tensor(const torch::Tensor&)>& sanitize);
+    void processActions(const torch::Tensor& actions,
+                        const torch::Tensor& default_dof_pos_reindexed,
+                        const torch::Tensor& dof_reindex_inv,
+                        const torch::TensorOptions& options,
+                        const std::function<torch::Tensor(const torch::Tensor&)>& sanitize);
+    void logInferenceLatency(const std::chrono::steady_clock::time_point& t_infer_start);
+    void writeRobotCommandFromOutput();
 
     std::shared_ptr<rclcpp_lifecycle::LifecycleNode> node_;
     // 默认配置
@@ -272,8 +328,9 @@ private:
     RobotState<double> robot_state_;
     RobotCommand<double> robot_command_;
 
-    // history buffer
+    // history buffer（与训练/Onboard 顺序一致：oldest→newest；首步需全填当前 proprio）
     std::shared_ptr<ObservationBuffer> history_obs_buf_;
+    int history_steps_since_clear_ = 0;
     torch::Tensor history_obs_;
     torch::Tensor last_contact_bool_;
 
@@ -303,6 +360,13 @@ private:
     torch::Tensor last_depth_latent_;
     bool last_depth_latent_valid_ = false;
     int depth_update_counter_ = 0;
+    // GRU hidden state：vision_stateful_jit.pt 需要外部管理 GRU 隐状态
+    // shape = (num_layers=1, batch=1, hidden_size=512)
+    torch::Tensor depth_gru_hidden_;
+    bool depth_gru_hidden_initialized_ = false;
+    // 冷启动：前 warm_up_steps 步仅推理不写指令
+    int inference_step_count_ = 0;
+    bool warm_up_done_logged_ = false;
     // 推理延迟 EMA
     bool latency_ema_initialized_ = false;
     double latency_total_ms_ema_ = 0.0;
@@ -315,7 +379,13 @@ private:
     cv::Mat rgb_image_;
     std::mutex rgb_mutex_;  // 线程安全锁
     rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr contact_states_pub_;
+    rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr foot_force_debug_pub_;
     rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr proprio_pub_;
+    rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr yaw_diff_pub_;
+    rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr history_order_debug_pub_;
+    rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr obs_freq_debug_pub_;
+
+    rclcpp::Time last_run_model_time_;  // 上次 runModel 时间，用于发布实际观测步长间隔
 
     std::mutex mtx_;  // 模型加载锁
 
@@ -339,6 +409,7 @@ private:
     std::array<double, 4> foot_force_mean_ema_{0.0, 0.0, 0.0, 0.0};
     std::array<double, 4> contact_ratio_ema_{0.0, 0.0, 0.0, 0.0};
     bool foot_contact_ema_initialized_{false};
+    torch::Tensor dof_vel_filtered_prev_;  // 上一帧滤波后关节速度（策略顺序），用于 dof_vel_filter_alpha
 };
 
 

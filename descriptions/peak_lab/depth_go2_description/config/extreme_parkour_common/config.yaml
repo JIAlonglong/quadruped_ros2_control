@@ -1,20 +1,36 @@
+# ===================== 配置对齐参考 =====================
+# 以下参数需与训练/导出一致，参考：traced/config.json、go2_original_parkour_config.py
+#   Kp/Kd: control.stiffness.joint=40, control.damping.joint=1
+#   action_scale: 0.25
+#   obs_scales: lin_vel=2, ang_vel=0.25, dof_pos=1, dof_vel=0.05
+#   clip_actions: 1.2
+#   default_joint_angles: 见 init_state.default_joint_angles（FL/FR/RL/RR）
+# 校验脚本: check_config_alignment.py（C++ config vs traced/config.json）
 # ===================== 策略主文件配置 =====================
-model_name: "baseline-student-01251800-24500-base_jit.pt"
+# baseline
+model_name: "base_jit.pt"
 framework: "isaacgym"
 rows: 4
 cols: 3
+# 每 decimation 个控制器周期执行一次策略。4→50Hz、20ms 步长（与训练/Onboard 一致）；推理跟不上可改为 8→25Hz、40ms
 decimation: 4
 
 # ===================== 观测/动作参数（遗留字段，仅保留兼容） =====================
-direction_mode: 0 # 方向控制模式：0-策略自动，1-遥控器手动
+# 方向控制模式：0=策略(深度网络)自动指定 yaw，1=遥控器(键盘 rx)指定 yaw；为 1 时仍会计算并发布「人工 yaw vs 深度 yaw」差值（见 publish_yaw_diff）
+direction_mode: 0
 # 训练脚本中曾使用 num_observations 标识基础观测维度，当前 C++ 控制器已不再读取该值
 num_observations: 53  # legacy: 仅作记录，实际观测维度由 num_proprio + 历史/深度特征计算得到
 # observations 字段为原脚本中的观测名列表，保留以便对照训练配置，控制器不再消费
 # observations: [ "commands", "ang_vel", "gravity_vec",  "dof_pos", "dof_vel", "actions" ]
+# 观测与历史顺序：见《观测与历史顺序对齐说明.md》。proprio 53 维类别顺序、history 最旧→最新、首步全填均已与训练/Onboard 对齐
 observations_history:  [0,1,2,3,4,5,6,7,8,9]
 clip_obs: 100.0
-clip_actions: 1.2
-forward_command_speed: 0.5
+clip_actions: 1.2   # 与训练 normalization.clip_actions 一致
+# 前向速度指令：键盘 ly 映射到 [lin_vel_x_range]；ly=-1→min，ly=1→max；无键盘时用 forward_command_speed
+lin_vel_x_range: [ 0.2, 0.8 ]
+# 无键盘或 ly 中立时的默认前向速度（m/s）。训练 max_ranges [0.3,0.8]；
+# Gazebo 物理更灵敏，略降以减缓行进速度（可按需在 0.3~0.5 间调）
+forward_command_speed: 0.4
 clip_actions_lower: [ -1.2, -1.2, -1.2,
                       -1.2, -1.2, -1.2,
                       -1.2, -1.2, -1.2,
@@ -23,7 +39,8 @@ clip_actions_upper: [ 1.2, 1.2, 1.2,
                       1.2, 1.2, 1.2,
                       1.2, 1.2, 1.2,
                       1.2, 1.2, 1.2 ]
-# RL 控制 PD 增益（Gazebo 下 20/0.5 容易站不起来 -> 先尝试 40/1.0，更接近 go2_original_parkour_config.py）
+# RL 控制 PD：需与训练/导出一致（traced/config.json = go2_original_parkour：stiffness 40, damping 1）
+# Kp 越大蹬地越有力，Kd 略大更稳；过大会抖
 rl_kp: [ 40, 40, 40,
          40, 40, 40,
          40, 40, 40,
@@ -35,6 +52,7 @@ rl_kd: [ 1.0, 1.0, 1.0,
 hip_scale_reduction: 1.0
 hip_scale_reduction_indices: [ 0, 3, 6, 9 ]
 num_of_dofs: 12
+# 策略输出缩放；必须与训练一致（legged_robot.py go2_original_parkour：action_scale=0.25）
 action_scale: 0.25
 # 关节顺序重排：ROS 顺序 -> 策略/仿真顺序（FR, FL, RR, RL）
 # ROS joints: [FL, FR, RL, RR] -> policy order: [FR, FL, RR, RL]
@@ -45,32 +63,38 @@ dof_reindex: [ 3, 4, 5,
 # 足端顺序重排：ROS feet_names(FL,FR,RL,RR) -> 策略顺序(FR,FL,RR,RL)
 feet_reindex: [ 1, 0, 3, 2 ]
 
-# 显式指定训练端 default_joint_angles（优先级高于 robot_control.yaml 的 stand_pos）
-# 顺序需与 controller joints 一致（FL, FR, RL, RR）
+# 默认关节角（action=0 时的目标）：与训练 init_state.default_joint_angles 一致（FL,FR,RL,RR 各 hip,thigh,calf）
 default_dof_pos: [ 0.1, 0.8, -1.5,
                    -0.1, 0.8, -1.5,
                    0.1, 1.0, -1.5,
                    -0.1, 1.0, -1.5 ]
 
-lin_vel_scale: 2.0
-ang_vel_scale: 0.25
-dof_pos_scale: 1.0
-dof_vel_scale: 0.05
-delta_yaw_scale: 0.25  # 偏航角增量缩放因子
-foot_force_threshold: 25.0
-contact_use_last: false
+# 观测缩放：与训练 normalization.obs_scales / traced config 一致，不可随意改
+lin_vel_scale: 2.0    # obs_scales.lin_vel
+ang_vel_scale: 0.25  # obs_scales.ang_vel
+dof_pos_scale: 1.0   # obs_scales.dof_pos
+dof_vel_scale: 0.05  # obs_scales.dof_vel
+# 关节速度低通：真机速度反馈噪声大，0.3 为常用折中
+dof_vel_filter_alpha: 0.0
+delta_yaw_scale: 0.15  # 偏航角增量缩放（键盘 J/L）；减小则转向更慢
+# 与训练一致：legged_robot.py 中 contact = norm(contact_forces) > 2（单位 N）
+# 本仓库 gz_quadruped_hardware 输出的足端力为力矢量模（sqrt(fx²+fy²+fz²)），单位 N，故用 2.0 对齐
+foot_force_threshold: 2.0
+# 与训练一致：contact_filt = contact OR last_contacts，避免接触状态高频闪烁
+contact_use_last: true
 
-commands_scale: [ 0.3, 0.3, 0.05 ]
+# 观测中命令 [vx, vy, yaw] 的缩放（与训练端 obs 范围一致）；当前代码由 lin_vel_scale/ang_vel_scale 推导，此项未读入
+commands_scale: [ 0.15, 0.15, 0.01 ]
 
-torque_limits: [ 40.0, 40.0, 40.0,
-                 40.0, 40.0, 40.0,
-                 40.0, 40.0, 40.0,
-                 40.0, 40.0, 40.0 ]
+torque_limits: [ 55.5, 55.5, 55.5,
+                 55.5, 55.5, 55.5,
+                 55.5, 55.5, 55.5,
+                 55.5, 55.5, 55.5 ]
 
 # 观测维度配置
 num_proprio: 53       # 基础本体观测（与 Python turn_obs 保持一致）
 num_hist_len: 10     # 历史窗口长度，用于观测缓冲
-num_scan: 0          # 学生策略部署不需要 scan/heights
+num_scan: 132        # save_jit 导出 base_jit.pt 时 obs 含 scan 段 132 维，部署无地形则填 0
 num_priv_explicit: 9 # 显式 privilige 观测（保留训练配置）
 num_priv_latent: 29  # 隐式 privilige latent（由历史编码得到）
 
@@ -78,29 +102,61 @@ num_priv_latent: 29  # 隐式 privilige latent（由历史编码得到）
 use_camera: true
 depth_width: 87
 depth_height: 58
-max_depth: 2.0       # 深度裁剪距离（米），对齐 onboard depth_range=0~3m
-depth_buffer_len: 1  # 深度历史帧堆叠长度（onboard 输入单帧）
+max_depth: 2.0       # 深度裁剪距离（米），与 traced/config.json depth.far_clip=2 一致
+depth_buffer_len: 1  # 深度历史帧数；traced 中 buffer_len=2（训练），实机推理多为单帧
 depth_feature_dim: 32   # 与 vision_jit.pt 输出 latent 长度一致（额外 2 维偏航在代码中单独处理）
 use_depth_cnn: true  # 若使用预训练CNN设为true
-depth_cnn_model: "baseline-student-01251800-24500-vision_jit.pt"  # 深度编码器使用 camera-policy-v0-10500 导出的 TorchScript 深度模型
-depth_yaw_clip: 1.0      # 深度网络输出 yaw_from_depth 的裁剪绝对值上限（弧度），越小越保守
+# 必须使用 vision_stateful_jit.pt（GRU hidden 作为显式输入/输出，保持时序记忆）
+# 旧版 vision_jit.pt 的 GRU hidden state 在 trace 时丢失，每次调用都从零开始（无时序记忆）
+depth_cnn_model: "vision_stateful_jit.pt"
+# 深度网络输出 yaw_from_depth 的裁剪绝对值上限（弧度），越小越保守
+# Onboard Python 不做任何裁剪；设很大值(100)等价于不裁剪，与 Onboard 对齐
+depth_yaw_clip: 100.0
 depth_yaw_alpha: 0.0    # 深度 yaw 低通滤波系数，越接近 1.0 越慢越平滑
-depth_crop_top: 60
-depth_crop_bottom: 100
-depth_crop_left: 80
-depth_crop_right: 36
+# 裁剪参数：Gazebo 640x480 → 匹配训练端有效视野
+# 训练：HFOV=87°, 分辨率 106x60, crop [:-2,4:-4] → 98x58 → resize 87x58
+#   有效 HFOV ≈ 87°*98/106 ≈ 80°, VFOV ≈ 53°*58/60 ≈ 51°
+# Gazebo：HFOV=87°, 640x480 → VFOV ≈ 67°
+#   水平：640*98/106 ≈ 591 → 左右各裁 (640-591)/2 ≈ 24
+#   垂直：需从 67° 裁到 51° → 480*(1-51/67) ≈ 115 总裁
+#     训练只裁底部(3.3%)，顶部不裁 → Gazebo: top≈50(对齐上边界), bottom≈65(对齐下边界)
+depth_crop_top: 50
+depth_crop_bottom: 65
+depth_crop_left: 24
+depth_crop_right: 24
 depth_update_interval: 5
-action_filter_alpha: 0.0 # 策略输出动作的一阶低通滤波系数，越接近 1.0 越平滑但响应越慢
+# 动作平滑：EMA 系数，filtered = alpha*last + (1-alpha)*current。0=无平滑易晃；0.2~0.3 轻度平滑、0.4~0.5 仿真减抖、0.65~0.75 实机更稳
+# Gazebo 物理 1000Hz 比训练 200Hz 更灵敏，适当平滑减少关节抖动
+action_filter_alpha: 0.0
 use_onboard_actor_backbone: false  # 需配合 onboard_jit 使用
 onboard_model_name: "our_student-9500-onboard_jit.pt"  # 由 save_jit.py 导出的 onboard 模型文件名
 dry_run: false  # 仅推理/不下发电机指令（实机对齐检查）
+# 冷启动：前 N 步仅推理不写指令（与 Extreme-Parkour-Onboard warm_up 一致），之后按 dry_run 决定；0=关闭
+warm_up_steps: 10
 # 推理延迟统计（边缘端）
 log_inference_latency: true
 latency_log_interval_ms: 2000
+# 控制步长(ms)=1000*decimation/update_rate；decimation=4、update_rate=200 → 20ms（50Hz 策略）
+control_step_ms: 20.0
+# 非空则每步将 timestamp_sec,latency_ema_ms,under_step(1/0) 追加写入该文件，便于离线检查推理是否小于控制步长
+latency_log_file: ""
 # 足端接触可视化（绘图用）
 publish_contact_states: true
 contact_states_topic: "/our_depth_rl/contact_states"
+# 足端力+阈值调试：发布 [FL,FR,RL,RR, threshold]，便于 rqt_plot 或 plot_foot_force_threshold.py 调 foot_force_threshold
+publish_foot_force_debug: true
+foot_force_debug_topic: "/our_depth_rl/foot_force_debug"
 publish_proprio: true
 proprio_topic: "/our_depth_rl/proprio"
 log_proprio_stats: true
+# 人工指定方向 vs 策略(深度)指定方向：发布 [manual_yaw, policy_yaw_from_depth, diff]（弧度），便于 rqt_plot 等查看；diff = manual - policy
+publish_yaw_diff: true
+yaw_diff_topic: "/our_depth_rl/yaw_diff"
+# 观测历史顺序检验：发布 history 各段均值 [mean_seg0, ..., mean_seg9]，index 0=最旧、9=最新
+# 检验方法：1) 首步（clear 后第一步）data 应 10 个数几乎相同；2) 运行若干步后 data[0] 与 data[9] 可不同（旧 vs 新）
+publish_history_order_debug: true
+history_order_debug_topic: "/our_depth_rl/history_order_debug"
+# 观测/策略频率检验：发布 [实际步长ms, 期望步长ms]。训练为 sim.dt*decimation=0.005*4=20ms(50Hz)；data[0] 应接近 data[1]
+publish_obs_freq_debug: true
+obs_freq_debug_topic: "/our_depth_rl/obs_freq_debug"
 proprio_log_interval_ms: 2000

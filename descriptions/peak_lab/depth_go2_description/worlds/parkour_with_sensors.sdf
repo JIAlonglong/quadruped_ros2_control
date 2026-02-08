@@ -1,6 +1,6 @@
 <?xml version="1.0" ?>
 <sdf version="1.6">
-  <world name="stairs">
+  <world name="two_platforms_gap">
     <physics name="1ms" type="ignored">
       <max_step_size>0.001</max_step_size>
       <real_time_factor>1.0</real_time_factor>
@@ -26,21 +26,30 @@
       <direction>-0.5 0.1 -0.9</direction>
     </light>
 
-    <model name="ground">
+    <!-- 左侧地面：x 约 -15～0，沟壑前；高摩擦便于蹬地 -->
+    <model name="ground_left">
       <static>true</static>
-      <pose>0 0 -0.1 0 0 0</pose>
+      <pose>-7.5 0 -0.1 0 0 0</pose>
       <link name="link">
         <collision name="collision">
           <geometry>
             <box>
-              <size>30 10 0.2</size>
+              <size>15 10 0.2</size>
             </box>
           </geometry>
+          <surface>
+            <friction>
+              <ode>
+                <mu>1.2</mu>
+                <mu2>1.2</mu2>
+              </ode>
+            </friction>
+          </surface>
         </collision>
         <visual name="visual">
           <geometry>
             <box>
-              <size>30 10 0.2</size>
+              <size>15 10 0.2</size>
             </box>
           </geometry>
           <material>
@@ -52,149 +61,142 @@
       </link>
     </model>
 
-    <model name="stairs_0">
+    <!-- 右侧地面：x 约 1～16，沟壑后；高摩擦 -->
+    <model name="ground_right">
       <static>true</static>
-      <pose>2.0 0 0.03 0 0 0</pose>
+      <pose>8.5 0 -0.1 0 0 0</pose>
       <link name="link">
         <collision name="collision">
           <geometry>
             <box>
-              <size>0.4 2.5 0.06</size>
+              <size>15 10 0.2</size>
             </box>
           </geometry>
+          <surface>
+            <friction>
+              <ode>
+                <mu>1.2</mu>
+                <mu2>1.2</mu2>
+              </ode>
+            </friction>
+          </surface>
         </collision>
         <visual name="visual">
           <geometry>
             <box>
-              <size>0.4 2.5 0.06</size>
+              <size>15 10 0.2</size>
             </box>
           </geometry>
+          <material>
+            <ambient>0.8 0.8 0.8 1</ambient>
+            <diffuse>0.8 0.8 0.8 1</diffuse>
+            <specular>0.2 0.2 0.2 1</specular>
+          </material>
         </visual>
       </link>
     </model>
 
-    <model name="stairs_1">
+    <!-- 高台 1（起点）：40cm 高，机器人 spawn 在此；x=-0.5～0.5，台面 z=0.4；高摩擦便于起跳/着地 -->
+    <model name="platform_1">
       <static>true</static>
-      <pose>2.4 0 0.06 0 0 0</pose>
+      <pose>0 0 0.2 0 0 0</pose>
       <link name="link">
         <collision name="collision">
           <geometry>
             <box>
-              <size>0.4 2.5 0.12</size>
+              <size>1.0 2.5 0.4</size>
             </box>
           </geometry>
+          <surface>
+            <friction>
+              <ode>
+                <mu>1.2</mu>
+                <mu2>1.2</mu2>
+              </ode>
+            </friction>
+          </surface>
         </collision>
         <visual name="visual">
           <geometry>
             <box>
-              <size>0.4 2.5 0.12</size>
+              <size>1.0 2.5 0.4</size>
             </box>
           </geometry>
+          <material>
+            <ambient>0.5 0.6 0.5 1</ambient>
+            <diffuse>0.5 0.6 0.5 1</diffuse>
+            <specular>0.2 0.2 0.2 1</specular>
+          </material>
         </visual>
       </link>
     </model>
 
-    <model name="stairs_2">
+    <!-- 斜坡：相对原朝向旋转 90°，斜面沿 y 方向；高摩擦防打滑 -->
+    <model name="ramp">
       <static>true</static>
-      <pose>2.8 0 0.09 0 0 0</pose>
+      <pose>1.0 0 0.2 0.588 0 0</pose>
       <link name="link">
         <collision name="collision">
           <geometry>
             <box>
-              <size>0.4 2.5 0.18</size>
+              <size>0.3 0.6 0.05</size>
             </box>
           </geometry>
+          <surface>
+            <friction>
+              <ode>
+                <mu>1.2</mu>
+                <mu2>1.2</mu2>
+              </ode>
+            </friction>
+          </surface>
         </collision>
         <visual name="visual">
           <geometry>
             <box>
-              <size>0.4 2.5 0.18</size>
+              <size>0.3 0.6 0.05</size>
             </box>
           </geometry>
+          <material>
+            <ambient>0.5 0.5 0.6 1</ambient>
+            <diffuse>0.5 0.5 0.6 1</diffuse>
+            <specular>0.2 0.2 0.2 1</specular>
+          </material>
         </visual>
       </link>
     </model>
 
-    <model name="stairs_3">
+    <!-- 高台 2：斜坡后再隔 30cm 沟壑，40cm 高台中心 x=1.99；高摩擦便于前脚扒台面、后脚蹬地 -->
+    <model name="platform_2">
       <static>true</static>
-      <pose>3.2 0 0.12 0 0 0</pose>
+      <pose>1.99 0 0.2 0 0 0</pose>
       <link name="link">
         <collision name="collision">
           <geometry>
             <box>
-              <size>0.4 2.5 0.24</size>
+              <size>1.0 2.5 0.4</size>
             </box>
           </geometry>
+          <surface>
+            <friction>
+              <ode>
+                <mu>1.2</mu>
+                <mu2>1.2</mu2>
+              </ode>
+            </friction>
+          </surface>
         </collision>
         <visual name="visual">
           <geometry>
             <box>
-              <size>0.4 2.5 0.24</size>
+              <size>1.0 2.5 0.4</size>
             </box>
           </geometry>
-        </visual>
-      </link>
-    </model>
-
-    <model name="stairs_4">
-      <static>true</static>
-      <pose>3.6 0 0.15 0 0 0</pose>
-      <link name="link">
-        <collision name="collision">
-          <geometry>
-            <box>
-              <size>0.4 2.5 0.30</size>
-            </box>
-          </geometry>
-        </collision>
-        <visual name="visual">
-          <geometry>
-            <box>
-              <size>0.4 2.5 0.30</size>
-            </box>
-          </geometry>
-        </visual>
-      </link>
-    </model>
-
-    <model name="stairs_5">
-      <static>true</static>
-      <pose>4.0 0 0.18 0 0 0</pose>
-      <link name="link">
-        <collision name="collision">
-          <geometry>
-            <box>
-              <size>0.4 2.5 0.36</size>
-            </box>
-          </geometry>
-        </collision>
-        <visual name="visual">
-          <geometry>
-            <box>
-              <size>0.4 2.5 0.36</size>
-            </box>
-          </geometry>
-        </visual>
-      </link>
-    </model>
-
-    <model name="landing">
-      <static>true</static>
-      <pose>6.0 0 0.18 0 0 0</pose>
-      <link name="link">
-        <collision name="collision">
-          <geometry>
-            <box>
-              <size>4.0 2.5 0.36</size>
-            </box>
-          </geometry>
-        </collision>
-        <visual name="visual">
-          <geometry>
-            <box>
-              <size>4.0 2.5 0.36</size>
-            </box>
-          </geometry>
+          <material>
+            <ambient>0.6 0.5 0.4 1</ambient>
+            <diffuse>0.6 0.5 0.4 1</diffuse>
+            <specular>0.2 0.2 0.2 1</specular>
+          </material>
         </visual>
       </link>
     </model>

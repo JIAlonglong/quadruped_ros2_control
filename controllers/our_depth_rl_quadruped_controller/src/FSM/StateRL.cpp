@@ -24,10 +24,16 @@
 // - rl_kp/rl_kd/torque_limits：关节增益与力矩上限
 // - clip_actions_[upper/lower]：动作裁剪边界，防止异常输出
 // - use_camera/use_depth_cnn/max_depth 等：深度特征与预处理参数
+//
+// 与训练对齐（legged_robot.py）：
+// - proprio 53 维顺序、dof/feet reindex、obs_scales、clip_actions/action_scale 与 compute_observations/_compute_torques 一致
+// - 接触：contact_filt = contact|last_contacts，阈值与训练 norm(contact_forces)>2 对应（config: contact_use_last=true, foot_force_threshold=2）
+// - 历史：本步 policy 使用更新前的 history [t-9..t-1]，再 insert 当前步；首步全填当前 proprio
 
 #include "our_depth_rl_quadruped_controller/FSM/StateRL.h"
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include <rclcpp/logging.hpp>
+#include <fstream>
 #include <sensor_msgs/image_encodings.hpp>
 #include "std_msgs/msg/float32_multi_array.hpp"
 #include <yaml-cpp/yaml.h>
@@ -216,7 +222,7 @@ StateRL::StateRL(CtrlInterfaces& ctrl_interfaces,
                     cv::minMaxLoc(depth_vis, &min_val, &max_val);
                     const int invalid_count = cv::countNonZero(invalid_mask);
                     const int total_count = depth_vis.rows * depth_vis.cols;
-                    RCLCPP_INFO_THROTTLE(
+                    RCLCPP_DEBUG_THROTTLE(
                         rclcpp::get_logger("StateRL"), *node_->get_clock(), 2000,
                         "Depth vis stats: min=%.3f max=%.3f far=%.3f invalid=%d/%d enc=%s",
                         min_val, max_val, far_clip, invalid_count, total_count, msg->encoding.c_str());
@@ -269,13 +275,43 @@ StateRL::StateRL(CtrlInterfaces& ctrl_interfaces,
     {
         contact_states_pub_ = node_->create_publisher<std_msgs::msg::Float32MultiArray>(
             params_.contact_states_topic, 10);
-        RCLCPP_INFO(node_->get_logger(), "Contact states publisher: %s", params_.contact_states_topic.c_str());
+        RCLCPP_DEBUG(node_->get_logger(), "Contact states publisher: %s", params_.contact_states_topic.c_str());
+    }
+    if (params_.publish_foot_force_debug)
+    {
+        foot_force_debug_pub_ = node_->create_publisher<std_msgs::msg::Float32MultiArray>(
+            params_.foot_force_debug_topic, 10);
+        RCLCPP_DEBUG(node_->get_logger(), "Foot force debug publisher: %s (data: [FL,FR,RL,RR,threshold])",
+            params_.foot_force_debug_topic.c_str());
     }
     if (params_.publish_proprio)
     {
         proprio_pub_ = node_->create_publisher<std_msgs::msg::Float32MultiArray>(
             params_.proprio_topic, 10);
-        RCLCPP_INFO(node_->get_logger(), "Proprio publisher: %s", params_.proprio_topic.c_str());
+        RCLCPP_DEBUG(node_->get_logger(), "Proprio publisher: %s", params_.proprio_topic.c_str());
+    }
+    if (params_.publish_yaw_diff)
+    {
+        yaw_diff_pub_ = node_->create_publisher<std_msgs::msg::Float32MultiArray>(
+            params_.yaw_diff_topic, 10);
+        RCLCPP_DEBUG(node_->get_logger(), "Yaw diff publisher: %s (data: [manual_yaw, policy_yaw, diff])",
+            params_.yaw_diff_topic.c_str());
+    }
+    if (params_.publish_history_order_debug && params_.num_hist_len > 0)
+    {
+        history_order_debug_pub_ = node_->create_publisher<std_msgs::msg::Float32MultiArray>(
+            params_.history_order_debug_topic, 10);
+        RCLCPP_INFO(node_->get_logger(),
+            "观测历史顺序调试: 发布 %d 段均值到 %s (index 0=最旧, %d=最新)",
+            params_.num_hist_len, params_.history_order_debug_topic.c_str(), params_.num_hist_len - 1);
+    }
+    if (params_.publish_obs_freq_debug)
+    {
+        obs_freq_debug_pub_ = node_->create_publisher<std_msgs::msg::Float32MultiArray>(
+            params_.obs_freq_debug_topic, 10);
+        RCLCPP_INFO(node_->get_logger(),
+            "观测频率调试: 发布 [实际步长ms, 期望步长ms] 到 %s（与训练 sim.dt*decimation 一致应为 %.1f ms）",
+            params_.obs_freq_debug_topic.c_str(), params_.control_step_ms);
     }
     // 读取观测维度，默认53
     const int history_obs_dim = params_.num_proprio > 0 ? params_.num_proprio : 53;
@@ -330,7 +366,7 @@ StateRL::StateRL(CtrlInterfaces& ctrl_interfaces,
             onboard_policy_module_.eval();
             onboard_model_loaded_ = true;
             use_onboard_actor_backbone_ = true;
-            RCLCPP_INFO(node_->get_logger(), "Loaded onboard policy from %s", onboard_path.c_str());
+            RCLCPP_DEBUG(node_->get_logger(), "Loaded onboard policy from %s", onboard_path.c_str());
         }
         catch (const std::exception& e)
         {
@@ -424,9 +460,10 @@ void StateRL::enter()
     transition_percent_ = 0.0;
     transition_duration_ = std::max(1.0, ctrl_interfaces_.frequency_ * 1.0);
 
-    // 历史观测缓存清空（避免切换状态时把旧历史带入策略）
+    // 历史观测缓存清空（避免切换状态时把旧历史带入策略）；下一帧将做「首步全填」
     if (!params_.observations_history.empty()) {
         history_obs_buf_->clear();
+        history_steps_since_clear_ = 0;
     }
 
     running_ = true;
@@ -548,6 +585,7 @@ void StateRL::loadYaml(const std::string& config_path)
     params_.ang_vel_scale = config["ang_vel_scale"].as<double>();
     params_.dof_pos_scale = config["dof_pos_scale"].as<double>();
     params_.dof_vel_scale = config["dof_vel_scale"].as<double>();
+    params_.dof_vel_filter_alpha = config["dof_vel_filter_alpha"].as<double>(0.0);
 
     // 维度参数：用于拼接观测、分配张量形状（需在 reindex 解析前设置）
     params_.num_feet = config["num_feet"].as<int>(4);  // 默认4足机器人
@@ -676,26 +714,49 @@ void StateRL::loadYaml(const std::string& config_path)
     }
     params_.delta_yaw_scale = config["delta_yaw_scale"].as<double>();
     params_.forward_command_speed = config["forward_command_speed"].as<double>(0.0);
+    if (!config["lin_vel_x_range"].IsNull())
+    {
+        auto range = ReadVectorFromYaml<double>(config["lin_vel_x_range"]);
+        if (range.size() >= 2)
+        {
+            params_.lin_vel_x_min = range[0];
+            params_.lin_vel_x_max = range[1];
+        }
+        else
+        {
+            params_.lin_vel_x_min = params_.forward_command_speed;
+            params_.lin_vel_x_max = params_.forward_command_speed;
+        }
+    }
+    else
+    {
+        params_.lin_vel_x_min = params_.forward_command_speed;
+        params_.lin_vel_x_max = params_.forward_command_speed;
+    }
     params_.foot_force_threshold = config["foot_force_threshold"].as<double>(5.0); // 默认阈值设为5.0N
     params_.contact_use_last = config["contact_use_last"].as<bool>(false);
     params_.use_onboard_actor_backbone = config["use_onboard_actor_backbone"].as<bool>(false);
     params_.onboard_model_name = config["onboard_model_name"].as<std::string>("onboard_jit.pt");
     params_.dry_run = config["dry_run"].as<bool>(false);
+    params_.warm_up_steps = config["warm_up_steps"].as<int>(2);
     params_.log_inference_latency = config["log_inference_latency"].as<bool>(false);
     params_.latency_log_interval_ms = config["latency_log_interval_ms"].as<int>(2000);
+    params_.control_step_ms = config["control_step_ms"].as<double>(20.0);
+    params_.latency_log_file = config["latency_log_file"].as<std::string>("");
 
     // 维度参数已提前设置
 
     // 观测布局：这些字段必须与训练导出的模型签名一致，否则会维度对不上或语义错位
     params_.num_proprio = config["num_proprio"].as<int>(53);
+    params_.num_scan = config["num_scan"].as<int>(132);  // save_jit 导出 base_jit 时为 132，与 traced obs 维度一致
     params_.num_hist_len = config["num_hist_len"].as<int>(10);
     params_.num_priv_explicit = config["num_priv_explicit"].as<int>(0);
     params_.num_priv_latent = config["num_priv_latent"].as<int>(0);
     params_.direction_mode = config["direction_mode"].as<int>(0); // 默认 0 (自动)
     RCLCPP_INFO(
         rclcpp::get_logger("StateRL"),
-        "观测布局配置：proprio=%d, priv_explicit=%d, priv_latent=%d, hist_len=%d",
-        params_.num_proprio, params_.num_priv_explicit,
+        "观测布局配置：proprio=%d, scan=%d, priv_explicit=%d, priv_latent=%d, hist_len=%d",
+        params_.num_proprio, params_.num_scan, params_.num_priv_explicit,
         params_.num_priv_latent, params_.num_hist_len);
 
     // 相机相关参数：当 use_camera/use_depth_cnn 打开时，会尝试加载深度特征模型做编码
@@ -704,10 +765,18 @@ void StateRL::loadYaml(const std::string& config_path)
     params_.use_depth_cnn = config["use_depth_cnn"].as<bool>(false);
     params_.publish_contact_states = config["publish_contact_states"].as<bool>(false);
     params_.contact_states_topic = config["contact_states_topic"].as<std::string>("/our_depth_rl/contact_states");
+    params_.publish_foot_force_debug = config["publish_foot_force_debug"].as<bool>(false);
+    params_.foot_force_debug_topic = config["foot_force_debug_topic"].as<std::string>("/our_depth_rl/foot_force_debug");
     params_.publish_proprio = config["publish_proprio"].as<bool>(false);
     params_.proprio_topic = config["proprio_topic"].as<std::string>("/our_depth_rl/proprio");
     params_.log_proprio_stats = config["log_proprio_stats"].as<bool>(true);
     params_.proprio_log_interval_ms = config["proprio_log_interval_ms"].as<int>(2000);
+    params_.publish_yaw_diff = config["publish_yaw_diff"].as<bool>(false);
+    params_.yaw_diff_topic = config["yaw_diff_topic"].as<std::string>("/our_depth_rl/yaw_diff");
+    params_.publish_history_order_debug = config["publish_history_order_debug"].as<bool>(false);
+    params_.history_order_debug_topic = config["history_order_debug_topic"].as<std::string>("/our_depth_rl/history_order_debug");
+    params_.publish_obs_freq_debug = config["publish_obs_freq_debug"].as<bool>(false);
+    params_.obs_freq_debug_topic = config["obs_freq_debug_topic"].as<std::string>("/our_depth_rl/obs_freq_debug");
     if (params_.use_camera)
     {
         params_.depth_width = config["depth_width"].as<int>(58);   // 与 Python 中的 58x87 保持一致
@@ -722,7 +791,7 @@ void StateRL::loadYaml(const std::string& config_path)
         // 深度历史堆叠长度（硬件侧/encoder 可能使用 buffer_len 维度）
         params_.depth_buffer_len = config["depth_buffer_len"].as<int>(1);
         if (params_.depth_buffer_len < 1) params_.depth_buffer_len = 1;
-        params_.depth_cnn_model = config["depth_cnn_model"].as<std::string>("vision_weight.pt");
+        params_.depth_cnn_model = config["depth_cnn_model"].as<std::string>("vision_jit.pt");
         params_.depth_yaw_clip = config["depth_yaw_clip"].as<double>(0.8);
         params_.depth_yaw_alpha = config["depth_yaw_alpha"].as<double>(0.9);
         
@@ -793,7 +862,7 @@ void StateRL::loadYaml(const std::string& config_path)
             if (static_cast<int>(v.size()) == params_.num_of_dofs)
             {
                 params_.default_dof_pos = torch::tensor(v, torch::kFloat32).view({1, -1});
-                RCLCPP_INFO(rclcpp::get_logger("StateRL"), "Using default_dof_pos from config.yaml");
+                RCLCPP_DEBUG(rclcpp::get_logger("StateRL"), "Using default_dof_pos from config.yaml");
             }
             else
             {
@@ -815,9 +884,28 @@ void StateRL::loadYaml(const std::string& config_path)
 
 torch::Tensor StateRL::quatRotateInverse(const torch::Tensor& q, const torch::Tensor& v, const std::string& framework)
 {
-    // 坐标变换占位函数：
-    // 部分项目会在这里把世界系向量旋转到机体系（或做 inverse rotate），以对齐训练坐标系。
-    // 当前假设训练与在线使用坐标系一致，因此直接返回原向量。
+    // ======== quat_rotate_inverse 对齐分析 ========
+    //
+    // 训练端 (legged_robot.py):
+    //   base_ang_vel = quat_rotate_inverse(base_quat, root_states[:, 10:13])
+    //   Isaac Gym 的 root_states 角速度是 **世界坐标系 (world frame)**，
+    //   quat_rotate_inverse(q, v) = q⁻¹·v·q，将世界系向量旋转到机体系 (body frame)。
+    //   → 最终 base_ang_vel 是 body frame 角速度。
+    //
+    // 部署端 (Gazebo / 实机):
+    //   Gazebo IMU sensor 的 angular_velocity 默认输出坐标系为
+    //   **传感器局部坐标系 = body frame**（gz-sim 文档: IMU angular velocity
+    //   is reported in sensor frame when <localization> is not set to CUSTOM）。
+    //   → 读取的 gyroscope 已经是 body frame，无需再做 quat_rotate_inverse。
+    //
+    // 因此：直接返回原向量是正确的。
+    //
+    // 注意: obs_.lin_vel（来自 odometer）实际是世界系线速度，与训练端的 body frame
+    //       base_lin_vel 不同。但 base_jit.pt 内部 estimator 会覆写 priv_explicit 段，
+    //       所以 lin_vel 填什么值都不影响策略输出。
+    //
+    // 若未来使用 world frame 角速度源，需在此实现真正的逆旋转:
+    //   v_body = q_conj * v * q  (Hamilton 四元数乘法)
     (void)q;
     (void)framework;
     return v.clone();
@@ -900,7 +988,7 @@ void StateRL::getState()
                 }
             }
             foot_force_stats_initialized_ = true;
-            RCLCPP_INFO_THROTTLE(
+            RCLCPP_DEBUG_THROTTLE(
                 rclcpp::get_logger("StateRL"), *node_->get_clock(), 2000,
                 "Foot force range [N] FR(%.2f-%.2f) FL(%.2f-%.2f) RR(%.2f-%.2f) RL(%.2f-%.2f), thr=%.2f",
                 foot_force_min_[0], foot_force_max_[0],
@@ -918,59 +1006,50 @@ void StateRL::getState()
     }
 }
 
-void StateRL::runModel()
+// 发布观测/策略步长调试： [实际步长ms, 期望步长ms]，用于与训练 sim.dt*decimation=20ms 对齐
+void StateRL::publishObsFreqDebug()
 {
-    // 执行一次策略推理（不写接口，只写 robot_command_ 缓存）：
-    // 1) 由 robot_state_ / control_ 构建 proprio
-    // 2) （可选）调用 depth encoder 得到 depth_latent 与 yaw 修正
-    // 3) 更新历史缓存并拼接 policy_obs
-    // 4) 调用 TorchScript policy forward 得到 actions
-    // 5) 对 actions 裁剪/缩放，并映射为目标关节角（output_dof_pos_）
-    // 6) 写入 robot_command_，供 setCommand() 写入硬件接口
-    if (!model_loaded_)
+    const rclcpp::Time now = node_->get_clock()->now();
+    if (params_.publish_obs_freq_debug && obs_freq_debug_pub_ && last_run_model_time_.nanoseconds() > 0)
     {
-        RCLCPP_WARN_THROTTLE(rclcpp::get_logger("StateRL"), *node_->get_clock(), 2000,
-                             "Policy module not loaded, skip runModel.");
-        return;
+        const double actual_ms = (now - last_run_model_time_).seconds() * 1000.0;
+        std_msgs::msg::Float32MultiArray msg;
+        msg.data.resize(2);
+        msg.data[0] = static_cast<float>(actual_ms);
+        msg.data[1] = static_cast<float>(params_.control_step_ms);
+        obs_freq_debug_pub_->publish(msg);
     }
+    last_run_model_time_ = now;
+}
 
-    // 推理阶段无需梯度信息，显式关闭可减少开销
-    torch::NoGradGuard no_grad;
-    const auto options = torch::TensorOptions().dtype(torch::kFloat32).device(device_);
-    const auto sanitize_tensor = [&](const torch::Tensor& t) -> torch::Tensor {
-        if (!t.defined())
-        {
-            return t;
-        }
-        return torch::where(torch::isfinite(t), t, torch::zeros_like(t));
-    };
-
-    try
+// 构建关节/足端重排张量：ROS 顺序 -> 策略顺序（与 legged_robot.py reindex / reindex_feet 一致）
+RunModelReindex StateRL::buildReindexTensors()
+{
+    RunModelReindex r;
+    r.dof_reindex = torch::tensor(params_.dof_reindex, torch::TensorOptions().dtype(torch::kLong).device(device_));
+    r.dof_reindex_inv = torch::tensor(params_.dof_reindex_inv, torch::TensorOptions().dtype(torch::kLong).device(device_));
+    if (static_cast<int>(params_.feet_reindex.size()) == params_.num_feet)
+        r.feet_reindex = torch::tensor(params_.feet_reindex, torch::TensorOptions().dtype(torch::kLong).device(device_));
+    else
     {
-        const torch::Tensor dof_reindex =
-            torch::tensor(params_.dof_reindex, torch::TensorOptions().dtype(torch::kLong).device(device_));
-        const torch::Tensor dof_reindex_inv =
-            torch::tensor(params_.dof_reindex_inv, torch::TensorOptions().dtype(torch::kLong).device(device_));
+        r.feet_reindex = torch::arange(params_.num_feet, torch::TensorOptions().dtype(torch::kLong).device(device_));
+        RCLCPP_WARN_THROTTLE(rclcpp::get_logger("StateRL"), *node_->get_clock(), 2000,
+                             "feet_reindex size mismatch (%zu vs %d), fallback to identity.",
+                             params_.feet_reindex.size(), params_.num_feet);
+    }
+    return r;
+}
 
-        torch::Tensor feet_reindex;
-        if (static_cast<int>(params_.feet_reindex.size()) == params_.num_feet)
-        {
-            feet_reindex = torch::tensor(params_.feet_reindex, torch::TensorOptions().dtype(torch::kLong).device(device_));
-        }
-        else
-        {
-            // 防御：配置未正确加载时避免越界
-            feet_reindex = torch::arange(params_.num_feet, torch::TensorOptions().dtype(torch::kLong).device(device_));
-            RCLCPP_WARN_THROTTLE(
-                rclcpp::get_logger("StateRL"),
-                *node_->get_clock(),
-                2000,
-                "feet_reindex size mismatch (%zu vs %d), fallback to identity.",
-                params_.feet_reindex.size(), params_.num_feet);
-        }
+// 构建 53 维本体观测 proprio，与 legged_robot.compute_observations() 中 obs_buf 顺序一致：
+// [角速度*scale, imu(roll,pitch), yaw_info(3), commands(3), env_class(2), (pos-default)*scale, vel*scale, last_actions, contact]
+RunModelProprioResult StateRL::buildProprio(const RunModelReindex& reindex,
+                                           const torch::TensorOptions& options,
+                                           const std::function<torch::Tensor(const torch::Tensor&)>& sanitize_tensor)
+{
+    const torch::Tensor& dof_reindex = reindex.dof_reindex;
+    const torch::Tensor& feet_reindex = reindex.feet_reindex;
 
-        // ==================== 1. 构建 proprio 观测（基础本体观测） ====================
-        // 这里把 IMU、指令、关节位姿/速度、上一动作、接触估计等拼接成训练时所需的 proprio 向量
+    // ---------- 角速度（3 维，与训练 base_ang_vel * obs_scales.ang_vel 一致）----------
         std::array<float, 3> ang_vel_arr{
             static_cast<float>(robot_state_.imu.gyroscope[0]),
             static_cast<float>(robot_state_.imu.gyroscope[1]),
@@ -979,7 +1058,7 @@ void StateRL::runModel()
         torch::Tensor ang_vel = torch::from_blob(ang_vel_arr.data(), {1, 3}, torch::TensorOptions().dtype(torch::kFloat32)).clone();
         ang_vel = ang_vel * static_cast<float>(params_.ang_vel_scale);
 
-        // 用四元数计算 RPY（roll/pitch/yaw），用于对齐训练时的姿态观测格式
+        // ---------- IMU 姿态：roll, pitch（与训练 imu_obs = stack(roll, pitch) 一致）----------
         tf2::Quaternion base_quat_tf(robot_state_.imu.quaternion[0],
                                      robot_state_.imu.quaternion[1],
                                      robot_state_.imu.quaternion[2],
@@ -992,24 +1071,26 @@ void StateRL::runModel()
         // training obs_buf uses imu_obs = [roll, pitch]
         torch::Tensor imu = sanitize_tensor(torch::tensor({{static_cast<float>(roll), static_cast<float>(pitch)}}, options));
 
-        // training obs_buf uses:
-        // 0*self.delta_yaw, delta_yaw, delta_next_yaw  -> 3 dims
-        // our online controller currently doesn't have goals, so keep consistent shapes:
-        // - yaw_info[0] = 0
-        // - yaw_info[1] = delta_yaw (set to 0 for now)
-        // - yaw_info[2] = delta_next_yaw (set to 0 for now)
+        // ---------- 偏航信息 3 维：训练为 0*delta_yaw, delta_yaw, delta_next_yaw；无目标时填 0 保持维度一致 ----------
         torch::Tensor yaw_info = torch::zeros({1, 3}, options);
 
-        // 训练端 obs_buf 中 forward command 直接使用 commands[:,0:1]（未乘 obs_scales.lin_vel）。
-        // 为了对齐训练，这里也不额外乘 lin_vel_scale。
-        const float fwd_cmd = static_cast<float>(params_.forward_command_speed);
+        // ---------- 速度指令：前两维置 0，第三维为前向速度（与训练 commands[:,0:1] 一致）----------
+        // 键盘 ly (control_.x) 映射到 [lin_vel_x_min, lin_vel_x_max]；无键盘或 ly=0 用范围中点或 forward_command_speed。
+        double fwd_raw = params_.forward_command_speed;
+        if (params_.lin_vel_x_min < params_.lin_vel_x_max)
+        {
+            // ly in [-1, 1] -> [min, max]; ly=0 -> mid
+            const double ly = static_cast<double>(control_.x);
+            fwd_raw = params_.lin_vel_x_min + (ly + 1.0) * 0.5 * (params_.lin_vel_x_max - params_.lin_vel_x_min);
+            fwd_raw = std::max(params_.lin_vel_x_min, std::min(params_.lin_vel_x_max, fwd_raw));
+        }
+        const float fwd_cmd = static_cast<float>(fwd_raw);
         torch::Tensor commands = torch::tensor({{0.0f, 0.0f, fwd_cmd}}, options);
 
-        // training uses two one-hot dims:
-        // (env_class != 17), (env_class == 17)
-        // In sim we don't have env id, default to "not 17".
+        // ---------- 环境类别 one-hot：训练 (env_class!=17), (env_class==17)；部署默认 (1,0) ----------
         torch::Tensor env_class = torch::tensor({{1.0f, 0.0f}}, options);
 
+        // ---------- 关节位置/速度：ROS 顺序读入，按 dof_reindex 转为策略顺序，再减默认、乘 scale ----------
         std::vector<float> joint_pos_vec(params_.num_of_dofs);
         std::vector<float> joint_vel_vec(params_.num_of_dofs);
         for (int i = 0; i < params_.num_of_dofs; ++i)
@@ -1030,6 +1111,15 @@ void StateRL::runModel()
         joint_pos = (joint_pos - default_dof_pos) * static_cast<float>(params_.dof_pos_scale);
         joint_vel = joint_vel * static_cast<float>(params_.dof_vel_scale);
 
+        // 关节速度低通滤波（实机速度反馈噪声大时可开启，alpha 建议 0.2~0.5）
+        const float vel_alpha = static_cast<float>(params_.dof_vel_filter_alpha);
+        if (vel_alpha > 1e-6f && vel_alpha <= 1.0f)
+        {
+            if (dof_vel_filtered_prev_.defined() && dof_vel_filtered_prev_.numel() == joint_vel.numel())
+                joint_vel = vel_alpha * joint_vel + (1.0f - vel_alpha) * dof_vel_filtered_prev_.to(options);
+            dof_vel_filtered_prev_ = joint_vel.clone().to(torch::kCPU);
+        }
+
         // 关节分布调试：用于检查关节顺序/尺度是否异常
         {
             auto joint_pos_cpu = joint_pos.to(torch::kCPU);
@@ -1038,17 +1128,19 @@ void StateRL::runModel()
             const double pos_std = joint_pos_cpu.std(false).item<double>();
             const double vel_mean = joint_vel_cpu.mean().item<double>();
             const double vel_std = joint_vel_cpu.std(false).item<double>();
-            RCLCPP_INFO_THROTTLE(
+            RCLCPP_DEBUG_THROTTLE(
                 rclcpp::get_logger("StateRL"), *node_->get_clock(), 2000,
                 "Joint stats: pos_mean=%.4f pos_std=%.4f vel_mean=%.4f vel_std=%.4f",
                 pos_mean, pos_std, vel_mean, vel_std);
         }
 
+        // ---------- 上一拍动作（与训练 action_history_buf[:,-1] 语义一致：上一步策略输出）----------
         torch::Tensor last_actions_raw = obs_.actions.numel() == 0
             ? torch::zeros({1, params_.num_of_dofs}, options)
             : sanitize_tensor(obs_.actions.to(options));
         torch::Tensor last_actions = last_actions_raw.index_select(1, dof_reindex);
 
+        // ---------- 足端接触：训练 contact = norm(contact_forces)>2, contact_filt = contact|last_contacts；此处用标量力与阈值，contact_use_last 控制是否 OR ----------
         torch::Tensor contact_bool = torch::zeros(
             {1, params_.num_feet},
             torch::TensorOptions().dtype(torch::kBool).device(device_));
@@ -1113,7 +1205,7 @@ void StateRL::runModel()
                     contact_ratio_ema_[i] = contact_ratio_ema_[i] * (1.0 - alpha) + contact_val * alpha;
                 }
             }
-            RCLCPP_INFO_THROTTLE(
+            RCLCPP_DEBUG_THROTTLE(
                 rclcpp::get_logger("StateRL"), *node_->get_clock(), 2000,
                 "Foot force EMA [N] idx0=%.2f idx1=%.2f idx2=%.2f idx3=%.2f | contact ratio idx0=%.2f idx1=%.2f idx2=%.2f idx3=%.2f | thr=%.2f",
                 foot_force_mean_ema_[0], foot_force_mean_ema_[1], foot_force_mean_ema_[2], foot_force_mean_ema_[3],
@@ -1137,9 +1229,7 @@ void StateRL::runModel()
             torch::full({1, params_.num_feet}, 0.5f, options),
             torch::full({1, params_.num_feet}, -0.5f, options));
 
-        // training reindex_feet(contact_filt.float() - 0.5)
-        // contact_filt is bool -> float {0,1} then minus 0.5 => {-0.5, +0.5}
-        // our contact_raw already matches {-0.5, +0.5}; just reindex feet.
+        // 训练 reindex_feet(contact_filt.float()-0.5)，即接触 {0.5, -0.5}；此处 contact_raw 已是 ±0.5，再按 feet_reindex 重排
         torch::Tensor contact = contact_raw.index_select(1, feet_reindex);
         obs_.ang_vel = ang_vel.to(torch::kCPU);
         obs_.commands = commands.to(torch::kCPU);
@@ -1159,24 +1249,20 @@ void StateRL::runModel()
             }
             contact_states_pub_->publish(msg);
         }
+        if (params_.publish_foot_force_debug && foot_force_debug_pub_ && !ctrl_interfaces_.foot_force_state_interface_.empty())
+        {
+            std_msgs::msg::Float32MultiArray msg;
+            msg.data.resize(5);
+            const int n = std::min<int>(4, static_cast<int>(ctrl_interfaces_.foot_force_state_interface_.size()));
+            for (int i = 0; i < n; ++i)
+                msg.data[i] = static_cast<float>(ctrl_interfaces_.foot_force_state_interface_[i].get().get_value());
+            for (int i = n; i < 4; ++i)
+                msg.data[i] = 0.0f;
+            msg.data[4] = static_cast<float>(params_.foot_force_threshold);
+            foot_force_debug_pub_->publish(msg);
+        }
 
-        // ==================== training-aligned proprio layout ====================
-        // legged_robot.py:
-        // obs_buf = cat(
-        //   base_ang_vel*ang_vel_scale (3),
-        //   imu_obs (2),
-        //   0*delta_yaw (1),
-        //   delta_yaw (1),
-        //   delta_next_yaw (1),
-        //   0*commands[:,0:2] (2),
-        //   commands[:,0:1] (1)  -> forward command
-        //   (env_class!=17) (1),
-        //   (env_class==17) (1),
-        //   reindex((dof_pos-default)*dof_pos_scale) (12),
-        //   reindex(dof_vel*dof_vel_scale) (12),
-        //   reindex(action_history_buf[:,-1]) (12),
-        //   reindex_feet(contact_filt.float()-0.5) (4)
-        // )
+        // ---------- 按训练顺序拼接 53 维 proprio（与 legged_robot obs_buf 一致）----------
         torch::Tensor proprio = torch::cat(
             {ang_vel, imu, yaw_info, commands, env_class, joint_pos, joint_vel, last_actions, contact}, 1);
         proprio = sanitize_tensor(proprio.to(device_));
@@ -1190,7 +1276,7 @@ void StateRL::runModel()
             const double std = proprio_cpu_log.std(false).item<double>();
             const double vmin = proprio_cpu_log.min().item<double>();
             const double vmax = proprio_cpu_log.max().item<double>();
-            RCLCPP_INFO_THROTTLE(
+            RCLCPP_DEBUG_THROTTLE(
                 rclcpp::get_logger("StateRL"), *node_->get_clock(), interval,
                 "Proprio stats: dim=%d mean=%.4f std=%.4f min=%.4f max=%.4f finite=%s",
                 dim, mean, std, vmin, vmax, all_finite ? "true" : "false");
@@ -1218,294 +1304,340 @@ void StateRL::runModel()
             }
             proprio_pub_->publish(msg);
         }
+    return RunModelProprioResult{ proprio, default_dof_pos };
+}
 
-        const auto t_infer_start = std::chrono::steady_clock::now();
-        // ==================== 2. 深度特征提取（depth encoder -> depth_latent + yaw） ====================
-        // 若启用了相机并已加载 depth encoder：把最新深度张量与 proprio 一起输入，得到 depth latent；
-        // 同时可从输出末尾取两维 yaw 修正写回 proprio 的 slice（训练时的约定）。
-        torch::Tensor depth_latent = torch::zeros({1, params_.depth_feature_dim}, options);
-        if (last_depth_latent_.defined() && last_depth_latent_.numel() > 0)
+// 深度编码：用最新深度图+proprio 跑 vision_jit，得到 depth_latent；并将 yaw 两维写回 proprio_inout[6:8]（与训练观测一致）
+torch::Tensor StateRL::updateDepthLatentAndYaw(torch::Tensor& proprio_inout,
+                                               const torch::TensorOptions& options,
+                                               const std::function<torch::Tensor(const torch::Tensor&)>& sanitize_tensor)
+{
+    torch::Tensor depth_latent = torch::zeros({1, params_.depth_feature_dim}, options);
+    if (last_depth_latent_.defined() && last_depth_latent_.numel() > 0)
+        depth_latent = last_depth_latent_.to(options);
+    const bool depth_ok = last_depth_frame_valid_.load();
+    depth_update_counter_++;
+    const bool should_update_depth = (depth_update_counter_ % params_.depth_update_interval) == 0;
+    if (params_.use_camera && params_.use_depth_cnn && depth_model_loaded_ && depth_ok && should_update_depth)
+    {
+        try
         {
-            depth_latent = last_depth_latent_.to(options);
-        }
-        const bool depth_ok = last_depth_frame_valid_.load();
-        depth_update_counter_++;
-        const bool should_update_depth =
-            (depth_update_counter_ % params_.depth_update_interval) == 0;
-        if (params_.use_camera && params_.use_depth_cnn && depth_model_loaded_ && depth_ok && should_update_depth)
-        {
-            try
+            const auto t_depth_start = std::chrono::steady_clock::now();
+            torch::Tensor latest_depth_copy;
             {
-                const auto t_depth_start = std::chrono::steady_clock::now();
-                // 为了线程安全：从共享 latest_depth_tensor_ 中短临界区拷贝一份到本地变量
-                torch::Tensor latest_depth_copy;
+                std::lock_guard<std::mutex> lock(depth_mutex_);
+                if (latest_depth_tensor_.defined() && latest_depth_tensor_.numel() > 0)
+                    latest_depth_copy = latest_depth_tensor_.clone();
+            }
+            if (latest_depth_copy.defined() && latest_depth_copy.numel() > 0)
+            {
+                if (latest_depth_copy.dim() == 5 && latest_depth_copy.size(1) == 1)
+                    latest_depth_copy = latest_depth_copy.squeeze(1);
+                if (latest_depth_copy.dim() == 4)
+                    latest_depth_copy = latest_depth_copy.index({torch::indexing::Slice(), -1, torch::indexing::Slice(), torch::indexing::Slice()});
+                else if (latest_depth_copy.dim() == 2)
+                    latest_depth_copy = latest_depth_copy.unsqueeze(0);
+                if (latest_depth_copy.dim() != 3)
                 {
-                    std::lock_guard<std::mutex> lock(depth_mutex_);
-                    if (latest_depth_tensor_.defined() && latest_depth_tensor_.numel() > 0)
-                    {
-                        latest_depth_copy = latest_depth_tensor_.clone();
-                    }
+                    RCLCPP_WARN_THROTTLE(rclcpp::get_logger("StateRL"), *node_->get_clock(), 2000,
+                                         "Depth tensor dim unexpected: %ld (expect 3). Skip depth encoder.", static_cast<long>(latest_depth_copy.dim()));
+                    latest_depth_copy = torch::Tensor();
                 }
                 if (latest_depth_copy.defined() && latest_depth_copy.numel() > 0)
                 {
-                    // depth_encoder expects [B,H,W]; if buffer provides [B,N,H,W], use latest frame
-                    if (latest_depth_copy.dim() == 5 && latest_depth_copy.size(1) == 1)
-                    {
-                        latest_depth_copy = latest_depth_copy.squeeze(1);
-                    }
-                    if (latest_depth_copy.dim() == 4)
-                    {
-                        latest_depth_copy = latest_depth_copy.index({
-                            torch::indexing::Slice(),
-                            -1,
-                            torch::indexing::Slice(),
-                            torch::indexing::Slice()
-                        });
-                    }
-                    else if (latest_depth_copy.dim() == 2)
-                    {
-                        latest_depth_copy = latest_depth_copy.unsqueeze(0);
-                    }
-                    if (latest_depth_copy.dim() != 3)
-                    {
-                        RCLCPP_WARN_THROTTLE(
-                            rclcpp::get_logger("StateRL"), *node_->get_clock(), 2000,
-                            "Depth tensor dim unexpected: %ld (expect 3). Skip depth encoder.",
-                            static_cast<long>(latest_depth_copy.dim()));
-                        latest_depth_copy = torch::Tensor();
-                    }
-
-                    if (latest_depth_copy.defined() && latest_depth_copy.numel() > 0)
-                    {
-                    // vision_jit 期望输入 [B,H,W]，若缓存为 [B,N,H,W] 则取最后一帧
                     if (latest_depth_copy.dim() == 4 && latest_depth_copy.size(0) == 1)
-                    {
                         latest_depth_copy = latest_depth_copy.index({0, -1}).unsqueeze(0);
+
+                    // 初始化 GRU hidden state（首次调用时）
+                    // GRU 参数：num_layers=1, batch=1, hidden_size=512
+                    if (!depth_gru_hidden_initialized_ || !depth_gru_hidden_.defined())
+                    {
+                        depth_gru_hidden_ = torch::zeros({1, 1, 512}, options);
+                        depth_gru_hidden_initialized_ = true;
                     }
-                        std::vector<torch::jit::IValue> depth_inputs;
-                        depth_inputs.emplace_back(latest_depth_copy.to(device_));
-                        depth_inputs.emplace_back(proprio);
-                        torch::Tensor depth_output = sanitize_tensor(depth_encoder_module_.forward(depth_inputs).toTensor());
 
-                        if (depth_output.sizes().size() == 2 && depth_output.size(0) == 1 &&
-                            depth_output.size(1) >= params_.depth_feature_dim + 2)
+                    std::vector<torch::jit::IValue> depth_inputs;
+                    depth_inputs.emplace_back(latest_depth_copy.to(device_));
+                    depth_inputs.emplace_back(proprio_inout);
+                    depth_inputs.emplace_back(depth_gru_hidden_.to(device_));
+
+                    // vision_stateful_jit.pt 返回 tuple(depth_output, new_hidden)
+                    auto forward_result = depth_encoder_module_.forward(depth_inputs);
+                    torch::Tensor depth_output;
+                    if (forward_result.isTuple())
+                    {
+                        // stateful 模型：(output [1, 34], new_hidden [1, 1, 512])
+                        auto tuple_elements = forward_result.toTuple()->elements();
+                        depth_output = sanitize_tensor(tuple_elements[0].toTensor());
+                        depth_gru_hidden_ = tuple_elements[1].toTensor().to(torch::kCPU);
+                    }
+                    else
+                    {
+                        // 兼容旧版 vision_jit.pt（无 state，返回单个 tensor）
+                        depth_output = sanitize_tensor(forward_result.toTensor());
+                    }
+                    if (depth_output.sizes().size() == 2 && depth_output.size(0) == 1 && depth_output.size(1) >= params_.depth_feature_dim + 2)
+                    {
+                        depth_latent = depth_output.index({0, torch::indexing::Slice(0, params_.depth_feature_dim)}).unsqueeze(0);
+                        torch::Tensor yaw_input;
+                        if (params_.direction_mode == 1)
                         {
-                            depth_latent = depth_output.index({0, torch::indexing::Slice(0, params_.depth_feature_dim)}).unsqueeze(0);
-                            
-                            torch::Tensor yaw_input;
-                            if (params_.direction_mode == 1) {
-                                // 手动模式：将遥控器转向值映射到观测中 (乘以 scale 缩放)
-                                float manual_yaw = static_cast<float>(control_.yaw * params_.delta_yaw_scale);
-                                yaw_input = torch::tensor({{manual_yaw, manual_yaw}}, options);
-                            } else {
-                                // 自动模式：使用深度网络原始输出
-                                yaw_input = sanitize_tensor(depth_output.index({0, torch::indexing::Slice(params_.depth_feature_dim,
-                                                                                              params_.depth_feature_dim + 2)}).unsqueeze(0) * 1.5f);
-                            }
-
-                            const float yaw_clip = static_cast<float>(params_.depth_yaw_clip);
-                            yaw_input = torch::clamp(yaw_input, -yaw_clip, yaw_clip);
-
-                            const float alpha = static_cast<float>(params_.depth_yaw_alpha);
-                            if (!has_depth_yaw_filtered_ ||
-                                !depth_yaw_filtered_.defined() ||
-                                depth_yaw_filtered_.sizes() != yaw_input.sizes())
-                            {
-                                depth_yaw_filtered_ = yaw_input.clone();
-                                has_depth_yaw_filtered_ = true;
-                            }
-                            else
-                            {
-                                depth_yaw_filtered_ = depth_yaw_filtered_ * alpha +
-                                                      yaw_input * (1.0f - alpha);
-                            }
-
-                            proprio.index_put_({torch::indexing::Slice(), torch::indexing::Slice(6, 8)}, depth_yaw_filtered_);
+                            float manual_yaw = static_cast<float>(control_.yaw * params_.delta_yaw_scale);
+                            yaw_input = torch::tensor({{manual_yaw, manual_yaw}}, options);
                         }
                         else
+                            yaw_input = sanitize_tensor(depth_output.index({0, torch::indexing::Slice(params_.depth_feature_dim, params_.depth_feature_dim + 2)}).unsqueeze(0) * 1.5f);
+                        const float yaw_clip = static_cast<float>(params_.depth_yaw_clip);
+                        yaw_input = torch::clamp(yaw_input, -yaw_clip, yaw_clip);
+                        const float alpha = static_cast<float>(params_.depth_yaw_alpha);
+                        if (!has_depth_yaw_filtered_ || !depth_yaw_filtered_.defined() || depth_yaw_filtered_.sizes() != yaw_input.sizes())
                         {
-                            RCLCPP_WARN_THROTTLE(rclcpp::get_logger("StateRL"), *node_->get_clock(), 2000,
-                                                 "Depth encoder output shape unexpected.");
+                            depth_yaw_filtered_ = yaw_input.clone();
+                            has_depth_yaw_filtered_ = true;
+                        }
+                        else
+                            depth_yaw_filtered_ = depth_yaw_filtered_ * alpha + yaw_input * (1.0f - alpha);
+                        proprio_inout.index_put_({torch::indexing::Slice(), torch::indexing::Slice(6, 8)}, depth_yaw_filtered_);
+                        if (params_.publish_yaw_diff && yaw_diff_pub_)
+                        {
+                            const float manual_yaw_scaled = static_cast<float>(std::clamp(control_.yaw * params_.delta_yaw_scale, -params_.depth_yaw_clip, params_.depth_yaw_clip));
+                            torch::Tensor policy_yaw_raw = sanitize_tensor(depth_output.index({0, torch::indexing::Slice(params_.depth_feature_dim, params_.depth_feature_dim + 2)}).unsqueeze(0) * 1.5f);
+                            const float yaw_clip_f = static_cast<float>(params_.depth_yaw_clip);
+                            float policy_yaw = std::clamp(policy_yaw_raw[0][0].item<float>(), -yaw_clip_f, yaw_clip_f);
+                            std_msgs::msg::Float32MultiArray msg;
+                            msg.data = {manual_yaw_scaled, policy_yaw, manual_yaw_scaled - policy_yaw};
+                            yaw_diff_pub_->publish(msg);
                         }
                     }
-                    const auto t_depth_end = std::chrono::steady_clock::now();
-                    if (params_.log_inference_latency)
-                    {
-                        const double depth_ms =
-                            std::chrono::duration<double, std::milli>(t_depth_end - t_depth_start).count();
-                        latency_depth_ms_ema_ = latency_ema_initialized_
-                                                ? (0.9 * latency_depth_ms_ema_ + 0.1 * depth_ms)
-                                                : depth_ms;
-                    }
+                    else
+                        RCLCPP_WARN_THROTTLE(rclcpp::get_logger("StateRL"), *node_->get_clock(), 2000, "Depth encoder output shape unexpected.");
+                }
+                const auto t_depth_end = std::chrono::steady_clock::now();
+                if (params_.log_inference_latency)
+                {
+                    const double depth_ms = std::chrono::duration<double, std::milli>(t_depth_end - t_depth_start).count();
+                    latency_depth_ms_ema_ = latency_ema_initialized_ ? (0.9 * latency_depth_ms_ema_ + 0.1 * depth_ms) : depth_ms;
                 }
             }
-            catch (const std::exception& e)
-            {
-                RCLCPP_ERROR(rclcpp::get_logger("StateRL"), "Depth encoder forward failed: %s", e.what());
-            }
         }
-        else if (params_.use_camera && params_.use_depth_cnn && depth_model_loaded_ && !depth_ok)
+        catch (const std::exception& e)
         {
-            // Depth dropout: do not feed stale depth into recurrent encoder.
-            // Keep depth_latent=zeros and do NOT inject yaw.
-            RCLCPP_WARN_THROTTLE(
-                rclcpp::get_logger("StateRL"), *node_->get_clock(), 1000,
-                "Depth invalid -> skip depth encoder (depth_latent=zeros) for stability.");
+            RCLCPP_ERROR(rclcpp::get_logger("StateRL"), "Depth encoder forward failed: %s", e.what());
         }
-        // 记录 depth_latent（CPU）用于调试/可视化
-        obs_.depth_latent = depth_latent.to(torch::kCPU);
-        last_depth_latent_ = obs_.depth_latent.clone();
+    }
+    else if (params_.use_camera && params_.use_depth_cnn && depth_model_loaded_ && !depth_ok)
+    {
+        RCLCPP_WARN_THROTTLE(rclcpp::get_logger("StateRL"), *node_->get_clock(), 1000,
+                             "Depth invalid -> skip depth encoder (depth_latent=zeros) for stability.");
+    }
+    obs_.depth_latent = depth_latent.to(torch::kCPU);
+    last_depth_latent_ = obs_.depth_latent.clone();
+    return depth_latent;
+}
 
-        // ==================== 3. 更新历史观测缓存（ObservationBuffer） ====================
-        // 把当前 proprio 写入历史环形缓存，再按 observations_history 取出并扁平化
-        torch::Tensor proprio_cpu = sanitize_tensor(proprio.to(torch::kCPU));
-        torch::Tensor proprio_history = proprio_cpu.clone();
-        // training masks yaw in proprio history: obs_buf[:, 6:8] = 0
-        // NOTE: slice(6,8) zeros indices 6 and 7 (2 dims), consistent with training.
-        proprio_history.index_put_({torch::indexing::Slice(), torch::indexing::Slice(6, 8)}, 0.0f);
+// 观测历史：与训练一致——本步 policy 使用「更新前」的 history（[t-9..t-1]），再写入当前步（yaw 6:8 置 0）
+torch::Tensor StateRL::getHistoryFlatAndUpdate(const torch::Tensor& proprio,
+                                               const torch::TensorOptions& options,
+                                               const std::function<torch::Tensor(const torch::Tensor&)>& sanitize_tensor)
+{
+    (void)options;
+    torch::Tensor proprio_cpu = sanitize_tensor(proprio.to(torch::kCPU));
+    torch::Tensor proprio_history = proprio_cpu.clone();
+    proprio_history.index_put_({torch::indexing::Slice(), torch::indexing::Slice(6, 8)}, 0.0f);  // 写入历史的 proprio 屏蔽 yaw
+    std::vector<int> history_indices = params_.observations_history;
+    if (history_indices.empty())
+    {
+        history_indices.resize(std::max(params_.num_hist_len, 1));
+        std::iota(history_indices.begin(), history_indices.end(), 0);
+    }
+    torch::Tensor history_flat;
+    if (history_steps_since_clear_ == 0)
+    {
+        history_obs_buf_->reset({0}, proprio_history);
+        history_steps_since_clear_ = 1;
+        history_flat = sanitize_tensor(history_obs_buf_->getObsVec(history_indices).to(device_));
+    }
+    else
+    {
+        history_flat = sanitize_tensor(history_obs_buf_->getObsVec(history_indices).to(device_));
         history_obs_buf_->insert(proprio_history);
-
-        std::vector<int> history_indices = params_.observations_history;
-        if (history_indices.empty())
+    }
+    if (params_.publish_history_order_debug && history_order_debug_pub_ && params_.num_hist_len > 0 && params_.num_proprio > 0)
+    {
+        std_msgs::msg::Float32MultiArray msg;
+        msg.data.resize(static_cast<size_t>(params_.num_hist_len));
+        for (int k = 0; k < params_.num_hist_len; ++k)
         {
-            history_indices.resize(std::max(params_.num_hist_len, 1));
-            std::iota(history_indices.begin(), history_indices.end(), 0);
+            const int start = k * params_.num_proprio;
+            const int end = start + params_.num_proprio;
+            torch::Tensor seg = history_flat.index({0, torch::indexing::Slice(start, end)});
+            msg.data[static_cast<size_t>(k)] = static_cast<float>(seg.mean().item<double>());
         }
-        torch::Tensor history_flat = sanitize_tensor(history_obs_buf_->getObsVec(history_indices).to(device_));
+        history_order_debug_pub_->publish(msg);
+    }
+    return history_flat;
+}
+
+// 策略前向：onboard 路径输入 (proprio, proprio_history_seq, depth_latent)；否则拼 policy_obs = [proprio|scan|priv_explicit|priv_latent|history_flat] 再与 depth_latent 输入
+torch::Tensor StateRL::runPolicyForward(const torch::Tensor& proprio,
+                                        const torch::Tensor& history_flat,
+                                        const torch::Tensor& depth_latent,
+                                        const torch::TensorOptions& options,
+                                        const std::function<torch::Tensor(const torch::Tensor&)>& sanitize_tensor)
+{
+    if (use_onboard_actor_backbone_ && onboard_model_loaded_)
+    {
+        torch::Tensor proprio_history_seq = history_flat.view({1, params_.num_hist_len, params_.num_proprio});
+        std::vector<torch::jit::IValue> onboard_inputs;
+        onboard_inputs.emplace_back(proprio);
+        onboard_inputs.emplace_back(proprio_history_seq);
+        onboard_inputs.emplace_back(depth_latent);
+        return sanitize_tensor(onboard_policy_module_.forward(onboard_inputs).toTensor().to(device_));
+    }
+    const int policy_obs_dim = params_.num_proprio + params_.num_scan + params_.num_priv_explicit + params_.num_priv_latent + params_.num_hist_len * params_.num_proprio;
+    torch::Tensor policy_obs = torch::zeros({1, policy_obs_dim}, options);
+    policy_obs.index_put_({torch::indexing::Slice(), torch::indexing::Slice(0, params_.num_proprio)}, proprio);
+    if (params_.num_priv_explicit > 0)
+    {
+        const int priv_offset = params_.num_proprio + params_.num_scan;
+        torch::Tensor priv_explicit = torch::zeros({1, params_.num_priv_explicit}, options);
+        torch::Tensor base_lin_vel = obs_.lin_vel.defined() ? obs_.lin_vel.to(options) : torch::zeros({1, 3}, options);
+        base_lin_vel = base_lin_vel * static_cast<float>(params_.lin_vel_scale);
+        const int copy_dims = std::min(3, params_.num_priv_explicit);
+        priv_explicit.index_put_({torch::indexing::Slice(), torch::indexing::Slice(0, copy_dims)}, base_lin_vel.index({0, torch::indexing::Slice(0, copy_dims)}).unsqueeze(0));
+        policy_obs.index_put_({torch::indexing::Slice(), torch::indexing::Slice(priv_offset, priv_offset + params_.num_priv_explicit)}, priv_explicit);
+    }
+    if (params_.num_hist_len > 0)
+    {
+        const int history_offset = policy_obs_dim - params_.num_hist_len * params_.num_proprio;
+        policy_obs.index_put_({torch::indexing::Slice(), torch::indexing::Slice(history_offset, policy_obs_dim)}, history_flat);
+    }
+    std::vector<torch::jit::IValue> policy_inputs;
+    policy_inputs.emplace_back(policy_obs);
+    policy_inputs.emplace_back(depth_latent);
+    return sanitize_tensor(policy_module_.forward(policy_inputs).toTensor().to(device_));
+}
+
+// 动作后处理：与训练一致——先按 clip_actions/action_scale 裁剪，再髋关节缩放、EMA 滤波、乘 action_scale 加 default 得目标关节角，再过渡混合、写 obs_.actions
+void StateRL::processActions(const torch::Tensor& actions,
+                             const torch::Tensor& default_dof_pos_reindexed,
+                             const torch::Tensor& dof_reindex_inv,
+                             const torch::TensorOptions& options,
+                             const std::function<torch::Tensor(const torch::Tensor&)>& sanitize_tensor)
+{
+    const float clip_actions = static_cast<float>(params_.clip_actions);
+    const float action_scale_cfg = static_cast<float>(params_.action_scale);
+    torch::Tensor actions_clamped = actions;  // 训练：clip_actions/action_scale 后 clip
+    if (action_scale_cfg > 1e-6f)
+    {
+        const float clip_abs = clip_actions / action_scale_cfg;
+        actions_clamped = torch::clamp(actions, -clip_abs, clip_abs);
+    }
+    for (const int index : params_.hip_scale_reduction_indices)
+    {
+        if (index >= 0 && index < params_.num_of_dofs)
+            actions_clamped[0][index] *= static_cast<float>(params_.hip_scale_reduction);
+    }
+    const float action_alpha = static_cast<float>(params_.action_filter_alpha);
+    if (!has_actions_filtered_ || !actions_filtered_.defined() || actions_filtered_.sizes() != actions_clamped.sizes())
+    {
+        actions_filtered_ = actions_clamped.clone();
+        has_actions_filtered_ = true;
+    }
+    else
+        actions_filtered_ = actions_filtered_ * action_alpha + actions_clamped * (1.0f - action_alpha);
+    torch::Tensor actions_scaled = sanitize_tensor(actions_filtered_ * static_cast<float>(params_.action_scale));  // 与训练 actions*action_scale 一致
+    torch::Tensor output_dof_pos_policy = sanitize_tensor(actions_scaled + default_dof_pos_reindexed);
+    output_dof_pos_ = sanitize_tensor(output_dof_pos_policy.index_select(1, dof_reindex_inv));  // 策略顺序 -> ROS 顺序
+    if (transition_percent_ < 1.5)  // 上电/切状态时的平滑过渡
+    {
+        transition_percent_ += 1.0 / transition_duration_;
+        const double phase = std::tanh(transition_percent_);
+        torch::Tensor start_pos_tensor = torch::from_blob(const_cast<double*>(start_pos_), {1, params_.num_of_dofs}, torch::TensorOptions().dtype(torch::kFloat64)).to(options);
+        output_dof_pos_ = output_dof_pos_ * phase + start_pos_tensor * (1.0 - phase);
+    }
+    obs_.actions = actions_filtered_.index_select(1, dof_reindex_inv).to(torch::kCPU);
+}
+
+// 记录本步推理总耗时 EMA，并可选写入 latency_log_file（时间戳, 耗时ms, 是否小于 control_step_ms）
+void StateRL::logInferenceLatency(const std::chrono::steady_clock::time_point& t_infer_start)
+{
+    const auto t_infer_end = std::chrono::steady_clock::now();
+    if (!params_.log_inference_latency)
+        return;
+    const double total_ms = std::chrono::duration<double, std::milli>(t_infer_end - t_infer_start).count();
+    latency_total_ms_ema_ = latency_ema_initialized_ ? (0.9 * latency_total_ms_ema_ + 0.1 * total_ms) : total_ms;
+    latency_ema_initialized_ = true;
+    const int interval = std::max(500, params_.latency_log_interval_ms);
+    const bool under_step = (latency_total_ms_ema_ < params_.control_step_ms);
+    RCLCPP_INFO_THROTTLE(rclcpp::get_logger("StateRL"), *node_->get_clock(), interval,
+                         "[推理] latency EMA [ms]: total=%.3f policy=%.3f depth=%.3f | step=%.1fms under_step=%s",
+                         latency_total_ms_ema_, latency_policy_ms_ema_, latency_depth_ms_ema_,
+                         params_.control_step_ms, under_step ? "yes" : "no");
+    if (!params_.latency_log_file.empty())
+    {
+        std::ofstream ofs(params_.latency_log_file, std::ios::app);
+        if (ofs.is_open())
+            ofs << node_->get_clock()->now().seconds() << "," << latency_total_ms_ema_ << "," << (under_step ? 1 : 0) << "\n";
+    }
+}
+
+// 将 output_dof_pos_ 与 rl_kp/rl_kd 写入 robot_command_，供 setCommand() 写入硬件接口
+void StateRL::writeRobotCommandFromOutput()
+{
+    for (int i = 0; i < params_.num_of_dofs; ++i)
+    {
+        robot_command_.motor_command.q[i] = output_dof_pos_[0][i].item<double>();
+        robot_command_.motor_command.dq[i] = 0.0;
+        robot_command_.motor_command.kp[i] = params_.rl_kp[0][i].item<double>();
+        robot_command_.motor_command.kd[i] = params_.rl_kd[0][i].item<double>();
+        robot_command_.motor_command.tau[i] = 0.0;
+    }
+    inference_step_count_++;
+}
+
+// 单步策略推理主流程（与训练 step 观测→策略→动作 对齐）：
+// 1) 构建 proprio  2) 深度编码并写回 yaw  3) 取历史、更新 buffer  4) 策略前向  5) 动作裁剪/缩放/滤波 → 目标关节角  6) 写 robot_command_
+void StateRL::runModel()
+{
+    if (!model_loaded_)
+    {
+        RCLCPP_WARN_THROTTLE(rclcpp::get_logger("StateRL"), *node_->get_clock(), 2000,
+                             "Policy module not loaded, skip runModel.");
+        return;
+    }
+    publishObsFreqDebug();
+
+    torch::NoGradGuard no_grad;
+    const auto options = torch::TensorOptions().dtype(torch::kFloat32).device(device_);
+    const auto sanitize_tensor = [&](const torch::Tensor& t) -> torch::Tensor {
+        if (!t.defined()) return t;
+        return torch::where(torch::isfinite(t), t, torch::zeros_like(t));
+    };
+
+    try
+    {
+        RunModelReindex reindex = buildReindexTensors();
+        RunModelProprioResult proprio_result = buildProprio(reindex, options, sanitize_tensor);
+        torch::Tensor proprio = proprio_result.proprio;
+        torch::Tensor default_dof_pos = proprio_result.default_dof_pos_reindexed;
+
+        const auto t_infer_start = std::chrono::steady_clock::now();
+        torch::Tensor depth_latent = updateDepthLatentAndYaw(proprio, options, sanitize_tensor);
+        torch::Tensor history_flat = getHistoryFlatAndUpdate(proprio, options, sanitize_tensor);
 
         const auto t_policy_start = std::chrono::steady_clock::now();
-        torch::Tensor actions;
-        if (use_onboard_actor_backbone_ && onboard_model_loaded_)
-        {
-            torch::Tensor proprio_history_seq = history_flat.view({1, params_.num_hist_len, params_.num_proprio});
-            std::vector<torch::jit::IValue> onboard_inputs;
-            onboard_inputs.emplace_back(proprio);
-            onboard_inputs.emplace_back(proprio_history_seq);
-            onboard_inputs.emplace_back(depth_latent);
-            actions = sanitize_tensor(onboard_policy_module_.forward(onboard_inputs).toTensor().to(device_));
-        }
-        else
-        {
-            const int policy_obs_dim =
-                params_.num_proprio +
-                params_.num_priv_explicit +
-                params_.num_priv_latent +
-                params_.num_hist_len * params_.num_proprio;
-
-            torch::Tensor policy_obs = torch::zeros({1, policy_obs_dim}, options);
-            policy_obs.index_put_({torch::indexing::Slice(), torch::indexing::Slice(0, params_.num_proprio)}, proprio);
-
-            if (params_.num_priv_explicit > 0)
-            {
-                const int priv_offset = params_.num_proprio;
-                torch::Tensor priv_explicit = torch::zeros({1, params_.num_priv_explicit}, options);
-                torch::Tensor base_lin_vel = obs_.lin_vel.defined()
-                                             ? obs_.lin_vel.to(options)
-                                             : torch::zeros({1, 3}, options);
-                base_lin_vel = base_lin_vel * static_cast<float>(params_.lin_vel_scale);
-                const int copy_dims = std::min(3, params_.num_priv_explicit);
-                priv_explicit.index_put_({torch::indexing::Slice(), torch::indexing::Slice(0, copy_dims)},
-                                         base_lin_vel.index({0, torch::indexing::Slice(0, copy_dims)}).unsqueeze(0));
-                policy_obs.index_put_({torch::indexing::Slice(), torch::indexing::Slice(priv_offset, priv_offset + params_.num_priv_explicit)},
-                                      priv_explicit);
-            }
-
-            if (params_.num_hist_len > 0)
-            {
-                const int history_offset = policy_obs_dim - params_.num_hist_len * params_.num_proprio;
-                policy_obs.index_put_(
-                    {torch::indexing::Slice(), torch::indexing::Slice(history_offset, policy_obs_dim)}, history_flat);
-            }
-
-            std::vector<torch::jit::IValue> policy_inputs;
-            policy_inputs.emplace_back(policy_obs);
-            policy_inputs.emplace_back(depth_latent);
-            actions = sanitize_tensor(policy_module_.forward(policy_inputs).toTensor().to(device_));
-        }
+        torch::Tensor actions = runPolicyForward(proprio, history_flat, depth_latent, options, sanitize_tensor);
         const auto t_policy_end = std::chrono::steady_clock::now();
         if (params_.log_inference_latency)
         {
-            const double policy_ms =
-                std::chrono::duration<double, std::milli>(t_policy_end - t_policy_start).count();
-            latency_policy_ms_ema_ = latency_ema_initialized_
-                                     ? (0.9 * latency_policy_ms_ema_ + 0.1 * policy_ms)
-                                     : policy_ms;
-        }
-        
-        const float clip_actions = static_cast<float>(params_.clip_actions);
-        const float action_scale_cfg = static_cast<float>(params_.action_scale);
-        torch::Tensor actions_clamped = actions;
-        if (action_scale_cfg > 1e-6f)
-        {
-            const float clip_abs = clip_actions / action_scale_cfg;
-            actions_clamped = torch::clamp(actions, -clip_abs, clip_abs);
+            const double policy_ms = std::chrono::duration<double, std::milli>(t_policy_end - t_policy_start).count();
+            latency_policy_ms_ema_ = latency_ema_initialized_ ? (0.9 * latency_policy_ms_ema_ + 0.1 * policy_ms) : policy_ms;
         }
 
-        for (const int index : params_.hip_scale_reduction_indices)
-        {
-            if (index >= 0 && index < params_.num_of_dofs)
-            {
-                actions_clamped[0][index] *= static_cast<float>(params_.hip_scale_reduction);
-            }
-        }
-
-        const float action_alpha = static_cast<float>(params_.action_filter_alpha);
-        if (!has_actions_filtered_ ||
-            !actions_filtered_.defined() ||
-            actions_filtered_.sizes() != actions_clamped.sizes())
-        {
-            actions_filtered_ = actions_clamped.clone();
-            has_actions_filtered_ = true;
-        }
-        else
-        {
-            actions_filtered_ = actions_filtered_ * action_alpha +
-                                actions_clamped * (1.0f - action_alpha);
-        }
-
-        torch::Tensor actions_scaled = sanitize_tensor(actions_filtered_ * static_cast<float>(params_.action_scale));
-        torch::Tensor output_dof_pos_policy = sanitize_tensor(actions_scaled + default_dof_pos);
-        output_dof_pos_ = sanitize_tensor(output_dof_pos_policy.index_select(1, dof_reindex_inv));
-
-        if (transition_percent_ < 1.5)
-        {
-            transition_percent_ += 1.0 / transition_duration_;
-            const double phase = std::tanh(transition_percent_);
-            torch::Tensor start_pos_tensor = torch::from_blob(
-                const_cast<double*>(start_pos_), {1, params_.num_of_dofs}, torch::TensorOptions().dtype(torch::kFloat64))
-                                             .to(options);
-            output_dof_pos_ = output_dof_pos_ * phase + start_pos_tensor * (1.0 - phase);
-        }
-
-        obs_.actions = actions_filtered_.index_select(1, dof_reindex_inv).to(torch::kCPU);
-
-        const auto t_infer_end = std::chrono::steady_clock::now();
-        if (params_.log_inference_latency)
-        {
-            const double total_ms =
-                std::chrono::duration<double, std::milli>(t_infer_end - t_infer_start).count();
-            latency_total_ms_ema_ = latency_ema_initialized_
-                                    ? (0.9 * latency_total_ms_ema_ + 0.1 * total_ms)
-                                    : total_ms;
-            latency_ema_initialized_ = true;
-            const int interval = std::max(500, params_.latency_log_interval_ms);
-            RCLCPP_INFO_THROTTLE(
-                rclcpp::get_logger("StateRL"), *node_->get_clock(), interval,
-                "Inference latency EMA [ms]: total=%.3f policy=%.3f depth=%.3f",
-                latency_total_ms_ema_, latency_policy_ms_ema_, latency_depth_ms_ema_);
-        }
-
-        // ==================== 6. 写入电机命令（robot_command_ -> joint interfaces） ====================
-        // 这里只写 robot_command_ 缓存；真正写 ros2_control 接口在 setCommand() 完成
-        for (int i = 0; i < params_.num_of_dofs; ++i)
-        {
-            robot_command_.motor_command.q[i] = output_dof_pos_[0][i].item<double>();
-            robot_command_.motor_command.dq[i] = 0.0;
-            robot_command_.motor_command.kp[i] = params_.rl_kp[0][i].item<double>();
-            robot_command_.motor_command.kd[i] = params_.rl_kd[0][i].item<double>();
-            robot_command_.motor_command.tau[i] = 0.0;
-        }
-        
+        processActions(actions, default_dof_pos, reindex.dof_reindex_inv, options, sanitize_tensor);
+        logInferenceLatency(t_infer_start);
+        writeRobotCommandFromOutput();
     }
     catch (const std::exception& e)
     {
@@ -1515,11 +1647,27 @@ void StateRL::runModel()
 }
 
 
-void StateRL::setCommand() const
+void StateRL::setCommand()
 {
     // 将 robot_command_ 写入 ros2_control 的 command interfaces。
-    // 为了提高鲁棒性，这里对接口数组大小做边界检查，并对每个关节 set_value() 做异常捕获。
+    // 冷启动：前 warm_up_steps 步仅推理不写指令（与 Extreme-Parkour-Onboard warm_up 一致），之后按 dry_run 决定。
     try {
+        if (inference_step_count_ < params_.warm_up_steps)
+        {
+            if (inference_step_count_ == 1)
+            {
+                RCLCPP_INFO(rclcpp::get_logger("StateRL"),
+                    "Warm-up: inference only for first %d steps (no motor commands)", params_.warm_up_steps);
+            }
+            return;
+        }
+        if (!warm_up_done_logged_)
+        {
+            warm_up_done_logged_ = true;
+            RCLCPP_INFO(rclcpp::get_logger("StateRL"),
+                "Warm-up done (%d steps). %s", params_.warm_up_steps,
+                params_.dry_run ? "dry_run enabled (inference only)" : "Sending motor commands.");
+        }
         if (params_.dry_run)
         {
             RCLCPP_WARN_THROTTLE(
@@ -1636,12 +1784,12 @@ void StateRL::setCommand() const
 
 
 torch::Tensor StateRL::preprocessDepthImage(const sensor_msgs::msg::Image::SharedPtr msg) {
-    // 深度图预处理（尽量与训练侧保持一致）：
-    // 1) ROS Image -> cv::Mat（支持 16UC1/32FC1）
-        // 2) crop：对齐训练侧 crop_depth_image(depth_image[:-2, 4:-4])
-        // 3) resize：对齐训练侧 torchvision.transforms.Resize(..., BICUBIC)
-        // 4) normalize：depth=(depth-near)/(far-near)-0.5
-        // 5) 转为 Torch Tensor：[1,H,W]，并缓存到 latest_depth_tensor_
+    // 深度图预处理（与训练完全一致，见《深度图处理对齐说明.md》）：
+    // 1) ROS Image -> cv::Mat（支持 16UC1/32FC1），单位统一为米
+    // 2) crop：由 depth_crop_* 配置；训练为固定 [:-2, 4:-4]，实机按分辨率设等效值
+    // 3) clip 到 [0, max_depth]
+    // 4) resize：cv::INTER_CUBIC 到 (depth_height, depth_width)，与训练 torchvision Resize(..., BICUBIC) 一致
+    // 5) 归一化：depth / max_depth - 0.5 -> [-0.5, 0.5]，顺序与训练一致（先 resize 再 normalize）
         const int target_height = params_.depth_height > 0 ? params_.depth_height : 58;
         const int target_width = params_.depth_width > 0 ? params_.depth_width : 87;
 
@@ -1724,19 +1872,18 @@ torch::Tensor StateRL::preprocessDepthImage(const sensor_msgs::msg::Image::Share
             cropped = cropped(roi);
         }
 
-        // 3) clip 到 [0, max_depth] 并归一化到 [0,1]
+        // 3) clip 到 [0, max_depth]（与训练 far_clip=2 一致）
         cv::max(cropped, 0.0, cropped);
         cv::min(cropped, max_depth_m, cropped);
-        cv::Mat normalized = cropped / std::max(1e-6, max_depth_m);
 
-        // 4) adaptive_avg_pool2d 到目标分辨率，并减去 0.5
+        // 4) 先 resize 再归一化，与训练一致（legged_robot.py: resize_transform 再 normalize_depth_image）
+        // 训练使用 torchvision Resize(..., BICUBIC)；此处用 OpenCV INTER_CUBIC 等价
+        cv::Mat resized;
+        cv::resize(cropped, resized, cv::Size(target_width, target_height), 0, 0, cv::INTER_CUBIC);
         torch::Tensor depth_tensor = torch::from_blob(
-            normalized.data, {normalized.rows, normalized.cols}, torch::kFloat32).clone();
+            resized.data, {resized.rows, resized.cols}, torch::kFloat32).clone();
         depth_tensor = depth_tensor.unsqueeze(0);  // [1,H,W]
-        depth_tensor = torch::nn::functional::adaptive_avg_pool2d(
-            depth_tensor,
-            torch::nn::functional::AdaptiveAvgPool2dFuncOptions({target_height, target_width}));
-        depth_tensor = depth_tensor - 0.5f;
+        depth_tensor = depth_tensor / static_cast<float>(std::max(1e-6, max_depth_m)) - 0.5f;
 
         torch::Tensor depth_frame = depth_tensor;
 

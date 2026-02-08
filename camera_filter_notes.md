@@ -2,7 +2,13 @@
 
 ## 1. 相机节点启动命令
 
-在机器人上启动 RealSense 相机节点（命名空间 `/rgbd_d435`），启用彩色与深度，并打开滤波与话题重映射：
+**一行命令（直接复制）：**
+
+```bash
+ros2 run realsense2_camera realsense2_camera_node --ros-args -r __ns:=/rgbd_d435 -p enable_color:=true -p enable_depth:=true -p filters:=spatial,temporal,holes_filling -r color/image_raw:=image -r depth/image_rect_raw:=depth_image
+```
+
+多行写法（同上，便于阅读）：
 
 ```bash
 ros2 run realsense2_camera realsense2_camera_node \

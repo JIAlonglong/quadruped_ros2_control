@@ -265,8 +265,9 @@
     <xacro:include filename="$(find gz_quadruped_playground)/models/D435/model.xacro"/>
 
     <xacro:d435 camID="1" name="d435">
-      <!-- <origin rpy="0 0.1 0" xyz="0.32 0 0.09"/> -->
-      <origin rpy="0 0.1 0" xyz="0.24 0 0.12"/>
+      <!-- 与该 checkpoint 的 config.json 对齐：position=[0.24,0,0.12], angle=[0,1]°
+           原值 pitch=0.2rad(11.5°) 远超训练范围 [0°,1°]，改为 0° -->
+      <origin rpy="0 0.0 0" xyz="0.24 0 0.12"/>
     </xacro:d435>
 
     <gazebo reference="lidar">

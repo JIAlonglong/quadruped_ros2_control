@@ -120,6 +120,13 @@ install(
         DESTINATION share/${PROJECT_NAME}/
 )
 
+install(
+        PROGRAMS
+        "${CMAKE_CURRENT_SOURCE_DIR}/scripts/plot_contact_gait.py"
+        "${CMAKE_CURRENT_SOURCE_DIR}/scripts/plot_foot_force_threshold.py"
+        DESTINATION lib/${PROJECT_NAME}
+)
+
 ament_export_dependencies(${dependencies})
 ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
 

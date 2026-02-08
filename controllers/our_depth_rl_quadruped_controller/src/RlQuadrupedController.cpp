@@ -81,8 +81,8 @@ namespace our_depth_rl_quadruped_controller
             {
                 mode_ = FSMMode::CHANGE;
                 next_state_ = getNextState(next_state_name_);
-                RCLCPP_INFO(get_node()->get_logger(), "Switched from %s to %s",
-                            current_state_->state_name_string.c_str(), next_state_->state_name_string.c_str());
+                RCLCPP_DEBUG(get_node()->get_logger(), "Switched from %s to %s",
+                             current_state_->state_name_string.c_str(), next_state_->state_name_string.c_str());
             }
         }
         else if (mode_ == FSMMode::CHANGE)
@@ -160,13 +160,12 @@ namespace our_depth_rl_quadruped_controller
     controller_interface::CallbackReturn LeggedGymController::on_configure(
         const rclcpp_lifecycle::State& previous_state)
     {
-        // 添加状态转换调试日志
-        RCLCPP_INFO(get_node()->get_logger(), "Transitioning from state %s to configuring", previous_state.label().c_str());
+        RCLCPP_DEBUG(get_node()->get_logger(), "Transitioning from state %s to configuring", previous_state.label().c_str());
         robot_description_subscription_ = get_node()->create_subscription<std_msgs::msg::String>(
             "/robot_description", rclcpp::QoS(rclcpp::KeepLast(1)).transient_local(),
             [this](const std_msgs::msg::String::SharedPtr msg)
             {
-                RCLCPP_INFO(get_node()->get_logger(), "Received robot description, size: %zu bytes", msg->data.size());
+                RCLCPP_DEBUG(get_node()->get_logger(), "Received robot description, size: %zu bytes", msg->data.size());
                 if (ctrl_component_.enable_estimator_)
                 {
                     try {
@@ -186,7 +185,7 @@ namespace our_depth_rl_quadruped_controller
         int attempt = 0;
         while (rclcpp::ok() && !robot_model_loaded_ && attempt < max_attempts)
         {
-            RCLCPP_INFO(get_node()->get_logger(), "等待机器人模型加载 (尝试 %d/%d)", attempt+1, max_attempts);
+            RCLCPP_DEBUG(get_node()->get_logger(), "等待机器人模型加载 (尝试 %d/%d)", attempt+1, max_attempts);
             rate.sleep();
             attempt++;
         }
@@ -240,17 +239,17 @@ namespace our_depth_rl_quadruped_controller
         {
             if (interface.get_prefix_name() == imu_name_)
             {
-                RCLCPP_INFO_STREAM(rclcpp::get_logger("our_depth_rl_quadruped_controller"), "IMU Interface: " << interface.get_interface_name() << ", Type: " << interface.get_value());
+                RCLCPP_DEBUG_STREAM(rclcpp::get_logger("our_depth_rl_quadruped_controller"), "IMU Interface: " << interface.get_interface_name() << ", Type: " << interface.get_value());
                 ctrl_interfaces_.imu_state_interface_.emplace_back(interface);
             }
             else if (interface.get_prefix_name() == foot_force_name_)
             {
-                RCLCPP_INFO_STREAM(rclcpp::get_logger("our_depth_rl_quadruped_controller"), "Foot Force Interface: " << interface.get_interface_name() << ", Type: " << interface.get_value());
+                RCLCPP_DEBUG_STREAM(rclcpp::get_logger("our_depth_rl_quadruped_controller"), "Foot Force Interface: " << interface.get_interface_name() << ", Type: " << interface.get_value());
                 ctrl_interfaces_.foot_force_state_interface_.emplace_back(interface);
             }
             else
             {
-                RCLCPP_INFO_STREAM(rclcpp::get_logger("our_depth_rl_quadruped_controller"), "Other State Interface: " << interface.get_interface_name() << ", Type: " << interface.get_value());
+                RCLCPP_DEBUG_STREAM(rclcpp::get_logger("our_depth_rl_quadruped_controller"), "Other State Interface: " << interface.get_interface_name() << ", Type: " << interface.get_value());
                 state_interface_map_[interface.get_interface_name()]->push_back(interface);
             }
         }

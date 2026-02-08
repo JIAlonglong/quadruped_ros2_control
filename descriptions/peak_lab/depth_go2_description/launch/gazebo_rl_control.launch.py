@@ -48,9 +48,13 @@ def generate_launch_description():
         "robot_control.yaml"
     )
 
+    # 地形切换：通过 launch 参数 world 选择 worlds/ 下的 .sdf 文件
+    # 例如：ros2 launch ... gazebo_rl_control.launch.py world:=room_with_obstacles.sdf
+    # 可选：parkour_with_sensors.sdf、empty_with_sensors.sdf、room_with_obstacles.sdf（房间+棕/绿高台+斜坡）
     world_arg = DeclareLaunchArgument(
         "world",
         default_value="parkour_with_sensors.sdf",
+        description="World file in worlds/ (e.g. parkour_with_sensors.sdf, empty_with_sensors.sdf)",
     )
     world_file = PathJoinSubstitution(
         [FindPackageShare(package_description), "worlds", LaunchConfiguration("world")]
@@ -59,15 +63,18 @@ def generate_launch_description():
     robot_description = process_xacro(camera_pitch_rad)
 
     # 通过 ros_gz_sim 的 create 可执行程序，把 robot_description 里的模型生成到 Gazebo
+    # 机器人放在地面、距离高台 2m（高台 1 中心在 x=0，故 spawn 在 x=-2）
     gz_spawn_entity = Node(
         package='ros_gz_sim',
         executable='create',
         output='screen',
         arguments=[
-            '-topic', 'robot_description', 
-            '-name', 'robot', 
-            '-allow_renaming', 'true', 
-            '-z', '0.4'
+            '-topic', 'robot_description',
+            '-name', 'robot',
+            '-allow_renaming', 'true',
+            '-x', '-2.0',
+            '-y', '0.0',
+            '-z', '0.4',
         ],
     )
 
@@ -155,7 +162,9 @@ def generate_launch_description():
         ]
         )
 
-    # 用 ros_gz_image 处理图像桥接，避免 depth_image 走 parameter_bridge 出现黑屏/空帧
+    # 用 ros_gz_image 处理图像桥接：参数为 (gz 话题, ros 话题)；若深度 100% 无效，请先启动仿真后
+    # 运行 gz topic -l | grep -E "image|depth" 查看 Gazebo 实际话题名，若带 /world/.../model/robot/... 前缀，
+    # 需把此处第一个参数改为实际 gz 深度话题（或确保 D435 模型 <topic>/rgbd_d435</topic> 在 gz 中生效）。
     gz_image_bridge_node = Node(
         package="ros_gz_image",
         executable="image_bridge",
