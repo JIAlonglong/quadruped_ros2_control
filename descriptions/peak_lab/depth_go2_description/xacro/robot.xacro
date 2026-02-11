@@ -4,6 +4,7 @@
 
   <xacro:arg name="DEBUG" default="false"/>
   <xacro:arg name="GAZEBO" default="false"/>
+  <xacro:arg name="MUJOCO" default="false"/>
   <xacro:arg name="CLASSIC" default="false"/>
   <xacro:arg name="CAMERA_PITCH" default="-0.25"/>
 
@@ -11,6 +12,9 @@
   <xacro:include filename="$(find depth_go2_description)/xacro/materials.xacro"/>
   <xacro:include filename="$(find depth_go2_description)/xacro/leg.xacro"/>
 
+  <!-- GAZEBO → gazebo.xacro（Gazebo 仿真）
+       !GAZEBO && MUJOCO → ros2_control_mujoco.xacro（MuJoCo 仿真）
+       !GAZEBO && !MUJOCO → ros2_control.xacro（实机） -->
   <xacro:if value="$(arg GAZEBO)">
     <xacro:if value="$(arg CLASSIC)">
       <xacro:include filename="$(find depth_go2_description)/xacro/gazebo_classic.xacro"/>
@@ -20,7 +24,12 @@
     </xacro:unless>
   </xacro:if>
   <xacro:unless value="$(arg GAZEBO)">
-    <xacro:include filename="$(find depth_go2_description)/xacro/ros2_control.xacro"/>
+    <xacro:if value="$(arg MUJOCO)">
+      <xacro:include filename="$(find depth_go2_description)/xacro/ros2_control_mujoco.xacro"/>
+    </xacro:if>
+    <xacro:unless value="$(arg MUJOCO)">
+      <xacro:include filename="$(find depth_go2_description)/xacro/ros2_control.xacro"/>
+    </xacro:unless>
   </xacro:unless>
 
 

@@ -6,7 +6,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess, OpaqueFunction, RegisterEventHandler, SetEnvironmentVariable
 from launch.conditions import IfCondition
 from launch.event_handlers import OnProcessExit
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import EnvironmentVariable, LaunchConfiguration
 from launch.substitutions import PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
@@ -26,7 +26,7 @@ def launch_setup(context, *args, **kwargs):
     ctrl_pkg_path = os.path.join(get_package_share_directory(controller_config_pkg))
 
     xacro_file = os.path.join(robot_pkg_path, "xacro", "robot.xacro")
-    robot_description = xacro.process_file(xacro_file).toxml()
+    robot_description = xacro.process_file(xacro_file, mappings={"MUJOCO": "true"}).toxml()
 
     robot_controllers = PathJoinSubstitution(
         [
@@ -36,7 +36,8 @@ def launch_setup(context, *args, **kwargs):
         ]
     )
 
-    rviz_config_file = os.path.join(ctrl_pkg_path, "config", "visualize_urdf.rviz")
+    # MuJoCo 视觉策略默认需要看相机流，直接用带图像面板的 RViz 配置。
+    rviz_config_file = os.path.join(ctrl_pkg_path, "config", "visualize_images.rviz")
 
     rviz = Node(
         package="rviz2",
@@ -155,9 +156,22 @@ def launch_setup(context, *args, **kwargs):
         condition=IfCondition(start_unitree_mujoco_sim),
     )
 
-    return [
-        # If running headless/WSL, MUJOCO_GL=egl is usually the safest default.
-        SetEnvironmentVariable(name="MUJOCO_GL", value=mujoco_gl),
+    # Only set MUJOCO_GL if user explicitly provided a non-empty value.
+    # Empty (default) lets MuJoCo auto-detect the best backend (avoids EGL crash in WSLg).
+    mujoco_gl_str = context.launch_configurations.get("mujoco_gl", "")
+    env_actions = []
+    if mujoco_gl_str:
+        env_actions.append(SetEnvironmentVariable(name="MUJOCO_GL", value=mujoco_gl))
+    # Critical: keep Unitree's CycloneDDS libs ahead of ROS CycloneDDS libs.
+    # Mixed libddsc (ROS) + libddscxx (Unitree) causes runtime crash: free(): invalid pointer.
+    env_actions.append(
+        SetEnvironmentVariable(
+            name="LD_LIBRARY_PATH",
+            value=["/opt/unitree_robotics/lib:", EnvironmentVariable("LD_LIBRARY_PATH", default_value="")],
+        )
+    )
+
+    return env_actions + [
         # Keep ROS2 domain aligned with the simulator/domain used for bringup.
         SetEnvironmentVariable(name="ROS_DOMAIN_ID", value=unitree_mujoco_domain),
         # Unitree SDK2 uses CycloneDDS internally (ddsc). Override any bad inherited config (e.g. eth2)
@@ -188,7 +202,7 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
             "robot_description_pkg",
-            default_value="go2_description",
+            default_value="depth_go2_description",
             description="URDF/xacro package used to generate robot_description (MuJoCo uses hardware_unitree_mujoco here).",
         ),
         DeclareLaunchArgument(
@@ -238,8 +252,8 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "mujoco_gl",
-            default_value="egl",
-            description="MUJOCO_GL value (egl is good for headless/WSL). Use 'glfw' on desktop if needed.",
+            default_value="",
+            description="MUJOCO_GL value. Empty=auto detect. Use 'egl' for headless, 'glfw' for WSLg desktop.",
         ),
         DeclareLaunchArgument(
             "cyclonedds_uri",
@@ -248,8 +262,8 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "force_cyclonedds_uri",
-            default_value="true",
-            description="If true, override inherited CYCLONEDDS_URI (recommended). Set false to keep your shell environment untouched.",
+            default_value="false",
+            description="If true, override CYCLONEDDS_URI env var. Default false: Unitree SDK2 manages DDS internally, external override may cause 'Failed to create domain' crash.",
         ),
         OpaqueFunction(function=launch_setup),
     ])

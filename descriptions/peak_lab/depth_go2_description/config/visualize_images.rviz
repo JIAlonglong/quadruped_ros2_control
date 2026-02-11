@@ -186,7 +186,7 @@ Visualization Manager:
       Value: true
       Visual Enabled: true
     - Class: rviz_default_plugins/Camera
-      Enabled: true
+      Enabled: false
       Far Plane Distance: 100
       Image Rendering: background and overlay
       Name: Camera
@@ -195,7 +195,7 @@ Visualization Manager:
         Depth: 5
         Durability Policy: Volatile
         History Policy: Keep Last
-        Reliability Policy: Reliable
+        Reliability Policy: Best Effort
         Value: /rgbd_d435/image
       Value: true
       Visibility:
@@ -234,14 +234,14 @@ Visualization Manager:
         Durability Policy: Volatile
         Filter size: 10
         History Policy: Keep Last
-        Reliability Policy: Reliable
+        Reliability Policy: Best Effort
         Value: /rgbd_d435/points
       Use Fixed Frame: true
       Use rainbow: true
       Value: true
     - Class: rviz_default_plugins/Image
       Enabled: true
-      Max Value: 2
+      Max Value: 3
       Median window: 5
       Min Value: 0.10000000149011612
       Name: DepthImage
@@ -250,8 +250,8 @@ Visualization Manager:
         Depth: 5
         Durability Policy: Volatile
         History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /depth_image/processed
+        Reliability Policy: Best Effort
+        Value: /rgbd_d435/depth_image
       Value: true
     - Class: rviz_default_plugins/Image
       Enabled: true
@@ -264,7 +264,7 @@ Visualization Manager:
         Depth: 5
         Durability Policy: Volatile
         History Policy: Keep Last
-        Reliability Policy: Reliable
+        Reliability Policy: Best Effort
         Value: /rgbd_d435/image
       Value: true
   Enabled: true

@@ -1,0 +1,193 @@
+<?xml version="1.0"?>
+<!-- MuJoCo 仿真用 ros2_control 配置
+     与 ros2_control.xacro（实机）结构完全一致，仅硬件插件和 DDS 参数不同。
+     接口名称（FR_foot_force 等）保持与 robot_control.yaml 一致，不要改动。 -->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+	<ros2_control name="UnitreeSystem" type="system">
+
+		<hardware>
+			<plugin>hardware_unitree_mujoco/HardwareUnitree</plugin>
+			<!-- DDS：MuJoCo 仿真用 domain=1, network_interface=lo（本地回环） -->
+			<param name="domain">1</param>
+			<param name="network_interface">lo</param>
+			<param name="show_foot_force">false</param>
+		</hardware>
+
+		<joint name="FR_hip_joint">
+			<command_interface name="position"/>
+			<command_interface name="velocity"/>
+			<command_interface name="effort"/>
+			<command_interface name="kp"/>
+			<command_interface name="kd"/>
+
+			<state_interface name="position"/>
+			<state_interface name="velocity"/>
+			<state_interface name="effort"/>
+		</joint>
+
+		<joint name="FR_thigh_joint">
+			<command_interface name="position"/>
+			<command_interface name="velocity"/>
+			<command_interface name="effort"/>
+			<command_interface name="kp"/>
+			<command_interface name="kd"/>
+
+			<state_interface name="position"/>
+			<state_interface name="velocity"/>
+			<state_interface name="effort"/>
+		</joint>
+
+		<joint name="FR_calf_joint">
+			<command_interface name="position"/>
+			<command_interface name="velocity"/>
+			<command_interface name="effort"/>
+			<command_interface name="kp"/>
+			<command_interface name="kd"/>
+
+			<state_interface name="position"/>
+			<state_interface name="velocity"/>
+			<state_interface name="effort"/>
+		</joint>
+
+		<joint name="FL_hip_joint">
+			<command_interface name="position"/>
+			<command_interface name="velocity"/>
+			<command_interface name="effort"/>
+			<command_interface name="kp"/>
+			<command_interface name="kd"/>
+
+			<state_interface name="position"/>
+			<state_interface name="velocity"/>
+			<state_interface name="effort"/>
+		</joint>
+
+		<joint name="FL_thigh_joint">
+			<command_interface name="position"/>
+			<command_interface name="velocity"/>
+			<command_interface name="effort"/>
+			<command_interface name="kp"/>
+			<command_interface name="kd"/>
+
+			<state_interface name="position"/>
+			<state_interface name="velocity"/>
+			<state_interface name="effort"/>
+		</joint>
+
+		<joint name="FL_calf_joint">
+			<command_interface name="position"/>
+			<command_interface name="velocity"/>
+			<command_interface name="effort"/>
+			<command_interface name="kp"/>
+			<command_interface name="kd"/>
+
+			<state_interface name="position"/>
+			<state_interface name="velocity"/>
+			<state_interface name="effort"/>
+		</joint>
+
+		<joint name="RR_hip_joint">
+			<command_interface name="position"/>
+			<command_interface name="velocity"/>
+			<command_interface name="effort"/>
+			<command_interface name="kp"/>
+			<command_interface name="kd"/>
+
+			<state_interface name="position"/>
+			<state_interface name="velocity"/>
+			<state_interface name="effort"/>
+		</joint>
+
+		<joint name="RR_thigh_joint">
+			<command_interface name="position"/>
+			<command_interface name="velocity"/>
+			<command_interface name="effort"/>
+			<command_interface name="kp"/>
+			<command_interface name="kd"/>
+
+			<state_interface name="position"/>
+			<state_interface name="velocity"/>
+			<state_interface name="effort"/>
+		</joint>
+
+		<joint name="RR_calf_joint">
+			<command_interface name="position"/>
+			<command_interface name="velocity"/>
+			<command_interface name="effort"/>
+			<command_interface name="kp"/>
+			<command_interface name="kd"/>
+
+			<state_interface name="position"/>
+			<state_interface name="velocity"/>
+			<state_interface name="effort"/>
+		</joint>
+
+		<joint name="RL_hip_joint">
+			<command_interface name="position"/>
+			<command_interface name="velocity"/>
+			<command_interface name="effort"/>
+			<command_interface name="kp"/>
+			<command_interface name="kd"/>
+
+			<state_interface name="position"/>
+			<state_interface name="velocity"/>
+			<state_interface name="effort"/>
+		</joint>
+
+		<joint name="RL_thigh_joint">
+			<command_interface name="position"/>
+			<command_interface name="velocity"/>
+			<command_interface name="effort"/>
+			<command_interface name="kp"/>
+			<command_interface name="kd"/>
+
+			<state_interface name="position"/>
+			<state_interface name="velocity"/>
+			<state_interface name="effort"/>
+		</joint>
+
+		<joint name="RL_calf_joint">
+			<command_interface name="position"/>
+			<command_interface name="velocity"/>
+			<command_interface name="effort"/>
+			<command_interface name="kp"/>
+			<command_interface name="kd"/>
+
+			<state_interface name="position"/>
+			<state_interface name="velocity"/>
+			<state_interface name="effort"/>
+		</joint>
+
+		<sensor name="imu_sensor">
+			<state_interface name="orientation.w"/>
+			<state_interface name="orientation.x"/>
+			<state_interface name="orientation.y"/>
+			<state_interface name="orientation.z"/>
+			<state_interface name="angular_velocity.x"/>
+			<state_interface name="angular_velocity.y"/>
+			<state_interface name="angular_velocity.z"/>
+			<state_interface name="linear_acceleration.x"/>
+			<state_interface name="linear_acceleration.y"/>
+			<state_interface name="linear_acceleration.z"/>
+		</sensor>
+
+		<!-- 与 gazebo.xacro / ros2_control.xacro 一致：保证仿真/实机共用同一套 robot_control.yaml -->
+		<sensor name="foot_force">
+			<state_interface name="FR_foot_force"/>
+			<state_interface name="FL_foot_force"/>
+			<state_interface name="RR_foot_force"/>
+			<state_interface name="RL_foot_force"/>
+		</sensor>
+
+		<sensor name="odometer">
+			<state_interface name="position.x"/>
+			<state_interface name="position.y"/>
+			<state_interface name="position.z"/>
+			<state_interface name="velocity.x"/>
+			<state_interface name="velocity.y"/>
+			<state_interface name="velocity.z"/>
+		</sensor>
+
+	</ros2_control>
+
+</robot>

@@ -74,14 +74,21 @@ lin_vel_scale: 2.0    # obs_scales.lin_vel
 ang_vel_scale: 0.25  # obs_scales.ang_vel
 dof_pos_scale: 1.0   # obs_scales.dof_pos
 dof_vel_scale: 0.05  # obs_scales.dof_vel
-# 关节速度低通：真机速度反馈噪声大，0.3 为常用折中
-dof_vel_filter_alpha: 0.0
+# 关节速度低通：真机速度反馈噪声大，0.3 为常用折中；仿真(Gazebo/MuJoCo)用 0.0
+# dof_vel_filter_alpha: 0.3  # ← 实机用这个
+dof_vel_filter_alpha: 0.0    # ← MuJoCo/Gazebo 仿真用这个
 delta_yaw_scale: 0.15  # 偏航角增量缩放（键盘 J/L）；减小则转向更慢
-# 与训练一致：legged_robot.py 中 contact = norm(contact_forces) > 2（单位 N）
-# 本仓库 gz_quadruped_hardware 输出的足端力为力矢量模（sqrt(fx²+fy²+fz²)），单位 N，故用 2.0 对齐
-foot_force_threshold: 2.0
+# 足端接触力阈值（单位取决于硬件接口）：
+#   Gazebo / MuJoCo（force-torque sensor, 单位 N）：2.0 与训练 norm(contact_forces)>2 对齐
+#   实机（Unitree Go2 foot_force, 原始传感器值）：25，与 Onboard Python 对齐
+foot_force_threshold: 2.0     # ← MuJoCo/Gazebo 仿真用这个（touch sensor 单位为 N）
+# foot_force_threshold: 25.0  # ← 实机 Go2 用这个
 # 与训练一致：contact_filt = contact OR last_contacts，避免接触状态高频闪烁
 contact_use_last: true
+# Estimator 安全检查（roll/pitch 超限自动切回 FIXEDSTAND）
+# MuJoCo 物理与训练(IsaacGym)有差异，容易误触发；仿真调试时建议关闭
+enable_safety_check: false    # ← MuJoCo 仿真用 false
+# enable_safety_check: true   # ← 实机用 true
 
 # 观测中命令 [vx, vy, yaw] 的缩放（与训练端 obs 范围一致）；当前代码由 lin_vel_scale/ang_vel_scale 推导，此项未读入
 commands_scale: [ 0.15, 0.15, 0.01 ]
@@ -102,7 +109,8 @@ num_priv_latent: 29  # 隐式 privilige latent（由历史编码得到）
 use_camera: true
 depth_width: 87
 depth_height: 58
-max_depth: 2.0       # 深度裁剪距离（米），与 traced/config.json depth.far_clip=2 一致
+# max_depth: 3.0     # ← 实机用 3.0（Onboard Python 一致，给更多反应距离）
+max_depth: 2.0       # ← MuJoCo/Gazebo 仿真用 2.0（与训练 far_clip=2 一致）
 depth_buffer_len: 1  # 深度历史帧数；traced 中 buffer_len=2（训练），实机推理多为单帧
 depth_feature_dim: 32   # 与 vision_jit.pt 输出 latent 长度一致（额外 2 维偏航在代码中单独处理）
 use_depth_cnn: true  # 若使用预训练CNN设为true
@@ -112,18 +120,30 @@ depth_cnn_model: "vision_stateful_jit.pt"
 # 深度网络输出 yaw_from_depth 的裁剪绝对值上限（弧度），越小越保守
 # Onboard Python 不做任何裁剪；设很大值(100)等价于不裁剪，与 Onboard 对齐
 depth_yaw_clip: 100.0
-depth_yaw_alpha: 0.0    # 深度 yaw 低通滤波系数，越接近 1.0 越慢越平滑
-# 裁剪参数：Gazebo 640x480 → 匹配训练端有效视野
-# 训练：HFOV=87°, 分辨率 106x60, crop [:-2,4:-4] → 98x58 → resize 87x58
-#   有效 HFOV ≈ 87°*98/106 ≈ 80°, VFOV ≈ 53°*58/60 ≈ 51°
-# Gazebo：HFOV=87°, 640x480 → VFOV ≈ 67°
-#   水平：640*98/106 ≈ 591 → 左右各裁 (640-591)/2 ≈ 24
-#   垂直：需从 67° 裁到 51° → 480*(1-51/67) ≈ 115 总裁
-#     训练只裁底部(3.3%)，顶部不裁 → Gazebo: top≈50(对齐上边界), bottom≈65(对齐下边界)
-depth_crop_top: 50
-depth_crop_bottom: 65
+# depth_yaw_alpha: 0.3  # ← 实机用 0.3（平滑启动跳变）
+depth_yaw_alpha: 0.0    # ← MuJoCo/Gazebo 仿真用 0.0（仿真信号干净，不需要滤波）
+# 裁剪参数：匹配训练端有效视野角度
+# 训练：HFOV=87°, 分辨率 106x60, fx=55.85, 光心 row=30
+#   crop [:-2, 4:-4] → 98x58; 上方 30px(28.24°), 下方 28px(26.63°) → VFOV_eff=54.87°
+#   水平: 4..102(98px) → HFOV_eff = 2*atan(98/(2*55.85)) = 82.50°
+#
+# MuJoCo / Gazebo 640x480 (HFOV=87°, fx=fy=337.2, 光心 row=240):
+#   水平: 需 HFOV_eff≈82.5° → W_crop=592 → left=right=24
+#   垂直: 上方 337.2*tan(28.24°)=181px → top=240-181=59
+#          下方 337.2*tan(26.63°)=169px → bottom=480-(240+169)=71
+depth_crop_top: 59
+depth_crop_bottom: 71
 depth_crop_left: 24
 depth_crop_right: 24
+
+# # RealSense D435 实机 @ 480×270 (HFOV=87°, fx=fy=252.9, 光心 cx=240 cy=135)
+# #   水平: 需 HFOV_eff≈82.5° → W_crop=444 → left=right=18
+# #   垂直: 上方 252.9*tan(28.24°)=136px > cy(135) → top=0（已全部覆盖）
+# #          下方 252.9*tan(26.63°)=127px → bottom=270-(135+127)=8
+# depth_crop_top: 0
+# depth_crop_bottom: 8
+# depth_crop_left: 18
+# depth_crop_right: 18
 depth_update_interval: 5
 # 动作平滑：EMA 系数，filtered = alpha*last + (1-alpha)*current。0=无平滑易晃；0.2~0.3 轻度平滑、0.4~0.5 仿真减抖、0.65~0.75 实机更稳
 # Gazebo 物理 1000Hz 比训练 200Hz 更灵敏，适当平滑减少关节抖动

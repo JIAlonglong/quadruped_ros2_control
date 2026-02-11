@@ -162,9 +162,11 @@ StateRL::StateRL(CtrlInterfaces& ctrl_interfaces,
         // RGB图像发布器
         rgb_image_pub_ = node_->create_publisher<sensor_msgs::msg::Image>("/rgb_image/processed", 10);
         
+        // 图像走 sensor data QoS（best effort），与 MuJoCo/RealSense 常见发布策略对齐
+        auto sensor_qos = rclcpp::SensorDataQoS();
         // 深度图像订阅器
         depth_image_sub_ = node_->create_subscription<sensor_msgs::msg::Image>(
-            "/rgbd_d435/depth_image", 10,
+            "/rgbd_d435/depth_image", sensor_qos,
             [this](const sensor_msgs::msg::Image::SharedPtr msg)
             {
                 try {
@@ -245,7 +247,7 @@ StateRL::StateRL(CtrlInterfaces& ctrl_interfaces,
         
         // RGB图像订阅器
         rgb_image_sub_ = node_->create_subscription<sensor_msgs::msg::Image>(
-            "/rgbd_d435/image", 10,
+            "/rgbd_d435/image", sensor_qos,
             [this](const sensor_msgs::msg::Image::SharedPtr msg)
             {
                 try {
@@ -441,8 +443,16 @@ void StateRL::enter()
         {1, params_.num_feet},
         torch::TensorOptions().dtype(torch::kBool).device(device_));
     last_depth_latent_ = torch::zeros({1, params_.depth_feature_dim});
-    depth_update_counter_ = 0;
+    // depth_update_counter_ 从 interval-1 开始，确保第 0 步（++后）正好能整除 → 立刻触发深度编码
+    depth_update_counter_ = std::max(1, params_.depth_update_interval) - 1;
     latest_depth_tensor_ = torch::Tensor();
+
+    // 重置深度相关状态（确保 RL→FixedDown→RL 重入时不残留旧状态）
+    has_depth_yaw_filtered_ = false;           // yaw EMA 滤波器需要重新初始化
+    depth_gru_hidden_initialized_ = false;     // GRU hidden state 从零开始
+    depth_for_encoding_initialized_ = false;   // 1-frame delay 缓存清空
+    depth_for_encoding_ = torch::Tensor();     // 清除残留帧
+    inference_step_count_ = 0;                 // warm-up 计数器归零
 
     // 输出缓存：关节目标/力矩等
     output_torques = torch::zeros({1, params_.num_of_dofs});
@@ -496,11 +506,19 @@ FSMStateName StateRL::checkChange()
     // - 遥控 command=1/2 可切到 PASSIVE/FIXEDDOWN
     if (enable_estimator_ and !estimator_->safety())
     {
-        // FIXEDSTAND will hold posture with PD gains, preventing sudden collapse.
-        RCLCPP_WARN_THROTTLE(
-            rclcpp::get_logger("StateRL"), *node_->get_clock(), 500,
-            "Estimator safety check failed -> switching RL -> FIXEDSTAND for safety.");
-        return FSMStateName::FIXEDSTAND;
+        if (params_.enable_safety_check)
+        {
+            RCLCPP_WARN_THROTTLE(
+                rclcpp::get_logger("StateRL"), *node_->get_clock(), 500,
+                "Estimator safety check failed -> switching RL -> FIXEDSTAND for safety.");
+            return FSMStateName::FIXEDSTAND;
+        }
+        else
+        {
+            RCLCPP_WARN_THROTTLE(
+                rclcpp::get_logger("StateRL"), *node_->get_clock(), 2000,
+                "Estimator safety check failed but safety_check disabled — continuing RL.");
+        }
     }
     switch (ctrl_interfaces_.control_inputs_.command)
     {
@@ -734,6 +752,7 @@ void StateRL::loadYaml(const std::string& config_path)
         params_.lin_vel_x_max = params_.forward_command_speed;
     }
     params_.foot_force_threshold = config["foot_force_threshold"].as<double>(5.0); // 默认阈值设为5.0N
+    params_.enable_safety_check = config["enable_safety_check"].as<bool>(true);  // MuJoCo 仿真可设为 false 跳过安全切换
     params_.contact_use_last = config["contact_use_last"].as<bool>(false);
     params_.use_onboard_actor_backbone = config["use_onboard_actor_backbone"].as<bool>(false);
     params_.onboard_model_name = config["onboard_model_name"].as<std::string>("onboard_jit.pt");
@@ -1205,9 +1224,9 @@ RunModelProprioResult StateRL::buildProprio(const RunModelReindex& reindex,
                     contact_ratio_ema_[i] = contact_ratio_ema_[i] * (1.0 - alpha) + contact_val * alpha;
                 }
             }
-            RCLCPP_DEBUG_THROTTLE(
+            RCLCPP_INFO_THROTTLE(
                 rclcpp::get_logger("StateRL"), *node_->get_clock(), 2000,
-                "Foot force EMA [N] idx0=%.2f idx1=%.2f idx2=%.2f idx3=%.2f | contact ratio idx0=%.2f idx1=%.2f idx2=%.2f idx3=%.2f | thr=%.2f",
+                "Foot force EMA [N] FL=%.2f FR=%.2f RL=%.2f RR=%.2f | contact ratio FL=%.2f FR=%.2f RL=%.2f RR=%.2f | thr=%.2f",
                 foot_force_mean_ema_[0], foot_force_mean_ema_[1], foot_force_mean_ema_[2], foot_force_mean_ema_[3],
                 contact_ratio_ema_[0], contact_ratio_ema_[1], contact_ratio_ema_[2], contact_ratio_ema_[3],
                 params_.foot_force_threshold);
@@ -1323,11 +1342,29 @@ torch::Tensor StateRL::updateDepthLatentAndYaw(torch::Tensor& proprio_inout,
         try
         {
             const auto t_depth_start = std::chrono::steady_clock::now();
-            torch::Tensor latest_depth_copy;
+            // ====== 1-frame delay：与训练 depth_buffer[:,-2] / Onboard Python self.last_depth_image 对齐 ======
+            // 深度编码始终使用上一个编码周期的深度帧，而非当前最新帧
+            torch::Tensor current_depth_snapshot;
             {
                 std::lock_guard<std::mutex> lock(depth_mutex_);
                 if (latest_depth_tensor_.defined() && latest_depth_tensor_.numel() > 0)
-                    latest_depth_copy = latest_depth_tensor_.clone();
+                    current_depth_snapshot = latest_depth_tensor_.clone();
+            }
+            // 选择用于编码的帧：优先使用上一周期保存的帧；首次时回退到当前帧
+            torch::Tensor latest_depth_copy;
+            if (depth_for_encoding_initialized_ && depth_for_encoding_.defined() && depth_for_encoding_.numel() > 0)
+            {
+                latest_depth_copy = depth_for_encoding_;
+            }
+            else
+            {
+                latest_depth_copy = current_depth_snapshot;  // 首次无历史，回退
+            }
+            // 保存当前帧供下一个编码周期使用
+            if (current_depth_snapshot.defined() && current_depth_snapshot.numel() > 0)
+            {
+                depth_for_encoding_ = current_depth_snapshot;
+                depth_for_encoding_initialized_ = true;
             }
             if (latest_depth_copy.defined() && latest_depth_copy.numel() > 0)
             {
@@ -1392,7 +1429,9 @@ torch::Tensor StateRL::updateDepthLatentAndYaw(torch::Tensor& proprio_inout,
                         const float alpha = static_cast<float>(params_.depth_yaw_alpha);
                         if (!has_depth_yaw_filtered_ || !depth_yaw_filtered_.defined() || depth_yaw_filtered_.sizes() != yaw_input.sizes())
                         {
-                            depth_yaw_filtered_ = yaw_input.clone();
+                            // 从零开始，而非直接取第一帧 yaw_input：
+                            // 配合 alpha>0 的 EMA，yaw 会从 0 平滑渐变到稳态值，避免启动时突然跳变导致偏转
+                            depth_yaw_filtered_ = torch::zeros_like(yaw_input);
                             has_depth_yaw_filtered_ = true;
                         }
                         else
@@ -1877,9 +1916,9 @@ torch::Tensor StateRL::preprocessDepthImage(const sensor_msgs::msg::Image::Share
         cv::min(cropped, max_depth_m, cropped);
 
         // 4) 先 resize 再归一化，与训练一致（legged_robot.py: resize_transform 再 normalize_depth_image）
-        // 训练使用 torchvision Resize(..., BICUBIC)；此处用 OpenCV INTER_CUBIC 等价
+        // Onboard Python 使用 F.adaptive_avg_pool2d；INTER_AREA 是 OpenCV 中等价的下采样方法
         cv::Mat resized;
-        cv::resize(cropped, resized, cv::Size(target_width, target_height), 0, 0, cv::INTER_CUBIC);
+        cv::resize(cropped, resized, cv::Size(target_width, target_height), 0, 0, cv::INTER_AREA);
         torch::Tensor depth_tensor = torch::from_blob(
             resized.data, {resized.rows, resized.cols}, torch::kFloat32).clone();
         depth_tensor = depth_tensor.unsqueeze(0);  // [1,H,W]

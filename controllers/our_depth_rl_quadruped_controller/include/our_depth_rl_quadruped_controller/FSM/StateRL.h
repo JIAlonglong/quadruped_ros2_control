@@ -154,6 +154,7 @@ struct ModelParams
         std::string onboard_model_name; // onboard 模型文件名
         bool dry_run = false; // 仅推理/不下发电机指令（实机对齐检查）
         int warm_up_steps = 2; // 冷启动：前 N 步仅推理不写指令（与 Extreme-Parkour-Onboard warm_up 一致），之后按 dry_run 决定
+        bool enable_safety_check = true; // Estimator 安全检查开关；MuJoCo 仿真可设 false 避免误触发
         // 相机参数
         int depth_width;
         int depth_height;
@@ -399,6 +400,10 @@ private:
 	    // - depth_buffer_len == 1: shape [1, H, W]
 	    // - depth_buffer_len  > 1: shape [1, N, H, W]
 	    torch::Tensor latest_depth_tensor_;
+	    // 1-frame delay: 与训练 depth_buffer[:,-2] / Onboard Python self.last_depth_image 对齐
+	    // 深度编码使用上一编码周期的深度帧，而非当前最新帧
+	    torch::Tensor depth_for_encoding_;             // 上一次编码周期保存的深度帧
+	    bool depth_for_encoding_initialized_{false};
 	    std::deque<torch::Tensor> depth_buffer_;       // 最近 N 帧深度（每帧 shape [H,W]）
     torch::Device device_ = torch::kCPU;           // 默认推理设备
 
