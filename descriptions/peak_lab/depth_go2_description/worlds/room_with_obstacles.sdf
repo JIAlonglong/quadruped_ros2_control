@@ -53,183 +53,130 @@
       </link>
     </model>
 
-    <!-- 房间四面墙，高 2.5m，厚 0.15m -->
-    <model name="wall_back">
+    <model name="platform_step_1">
       <static>true</static>
-      <pose>0 -4.075 1.25 0 0 0</pose>
+      <pose>0.0 0 0.1 0 0 0</pose>
       <link name="link">
         <collision name="collision">
           <geometry>
             <box>
-              <size>10.3 0.15 2.5</size>
+              <size>0.6 1.2 0.2</size>
             </box>
           </geometry>
         </collision>
         <visual name="visual">
           <geometry>
             <box>
-              <size>10.3 0.15 2.5</size>
+              <size>0.6 1.2 0.2</size>
             </box>
           </geometry>
           <material>
-            <ambient>0.6 0.6 0.65 1</ambient>
-            <diffuse>0.6 0.6 0.65 1</diffuse>
-            <specular>0.2 0.2 0.2 1</specular>
-          </material>
-        </visual>
-      </link>
-    </model>
-    <model name="wall_front">
-      <static>true</static>
-      <pose>0 4.075 1.25 0 0 0</pose>
-      <link name="link">
-        <collision name="collision">
-          <geometry>
-            <box>
-              <size>10.3 0.15 2.5</size>
-            </box>
-          </geometry>
-        </collision>
-        <visual name="visual">
-          <geometry>
-            <box>
-              <size>10.3 0.15 2.5</size>
-            </box>
-          </geometry>
-          <material>
-            <ambient>0.6 0.6 0.65 1</ambient>
-            <diffuse>0.6 0.6 0.65 1</diffuse>
-            <specular>0.2 0.2 0.2 1</specular>
-          </material>
-        </visual>
-      </link>
-    </model>
-    <model name="wall_left">
-      <static>true</static>
-      <pose>-5.075 0 1.25 0 0 0</pose>
-      <link name="link">
-        <collision name="collision">
-          <geometry>
-            <box>
-              <size>0.15 8.3 2.5</size>
-            </box>
-          </geometry>
-        </collision>
-        <visual name="visual">
-          <geometry>
-            <box>
-              <size>0.15 8.3 2.5</size>
-            </box>
-          </geometry>
-          <material>
-            <ambient>0.6 0.6 0.65 1</ambient>
-            <diffuse>0.6 0.6 0.65 1</diffuse>
-            <specular>0.2 0.2 0.2 1</specular>
-          </material>
-        </visual>
-      </link>
-    </model>
-    <model name="wall_right">
-      <static>true</static>
-      <pose>5.075 0 1.25 0 0 0</pose>
-      <link name="link">
-        <collision name="collision">
-          <geometry>
-            <box>
-              <size>0.15 8.3 2.5</size>
-            </box>
-          </geometry>
-        </collision>
-        <visual name="visual">
-          <geometry>
-            <box>
-              <size>0.15 8.3 2.5</size>
-            </box>
-          </geometry>
-          <material>
-            <ambient>0.6 0.6 0.65 1</ambient>
-            <diffuse>0.6 0.6 0.65 1</diffuse>
+            <ambient>0.7 0.6 0.35 1</ambient>
+            <diffuse>0.7 0.6 0.35 1</diffuse>
             <specular>0.2 0.2 0.2 1</specular>
           </material>
         </visual>
       </link>
     </model>
 
-    <!-- 障碍物 1：浅棕色高台（图中左侧大块） -->
-    <model name="platform_brown">
+    <model name="platform_step_2">
       <static>true</static>
-      <pose>0 0 0.2 0 0 0</pose>
+      <pose>0.8 0 0.125 0 0 0</pose>
       <link name="link">
         <collision name="collision">
           <geometry>
             <box>
-              <size>1.0 2.5 0.4</size>
+              <size>0.6 1.2 0.25</size>
             </box>
           </geometry>
         </collision>
         <visual name="visual">
           <geometry>
             <box>
-              <size>1.0 2.5 0.4</size>
+              <size>0.6 1.2 0.25</size>
             </box>
           </geometry>
           <material>
-            <ambient>0.65 0.55 0.45 1</ambient>
-            <diffuse>0.65 0.55 0.45 1</diffuse>
+            <ambient>0.74 0.55 0.36 1</ambient>
+            <diffuse>0.74 0.55 0.36 1</diffuse>
             <specular>0.2 0.2 0.2 1</specular>
           </material>
         </visual>
       </link>
     </model>
 
-    <!-- 障碍物 2：斜坡/木板，连接两高台 -->
-    <model name="ramp">
+    <model name="platform_step_3">
       <static>true</static>
-      <pose>1.0 0 0.2 0.588 0 0</pose>
+      <pose>1.6 0 0.15 0 0 0</pose>
       <link name="link">
         <collision name="collision">
           <geometry>
             <box>
-              <size>0.3 0.6 0.05</size>
+              <size>0.6 1.2 0.3</size>
             </box>
           </geometry>
         </collision>
         <visual name="visual">
           <geometry>
             <box>
-              <size>0.3 0.6 0.05</size>
+              <size>0.6 1.2 0.3</size>
             </box>
           </geometry>
           <material>
-            <ambient>0.55 0.55 0.58 1</ambient>
-            <diffuse>0.55 0.55 0.58 1</diffuse>
+            <ambient>0.76 0.5 0.37 1</ambient>
+            <diffuse>0.76 0.5 0.37 1</diffuse>
             <specular>0.2 0.2 0.2 1</specular>
           </material>
         </visual>
       </link>
     </model>
 
-    <!-- 障碍物 3：浅绿色高台（图中右侧大块） -->
-    <model name="platform_green">
+    <model name="platform_step_4">
       <static>true</static>
-      <pose>1.99 0 0.2 0 0 0</pose>
+      <pose>2.4 0 0.175 0 0 0</pose>
       <link name="link">
         <collision name="collision">
           <geometry>
             <box>
-              <size>1.0 2.5 0.4</size>
+              <size>0.6 1.2 0.35</size>
             </box>
           </geometry>
         </collision>
         <visual name="visual">
           <geometry>
             <box>
-              <size>1.0 2.5 0.4</size>
+              <size>0.6 1.2 0.35</size>
             </box>
           </geometry>
           <material>
-            <ambient>0.5 0.62 0.5 1</ambient>
-            <diffuse>0.5 0.62 0.5 1</diffuse>
+            <ambient>0.78 0.46 0.38 1</ambient>
+            <diffuse>0.78 0.46 0.38 1</diffuse>
+            <specular>0.2 0.2 0.2 1</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="platform_step_5">
+      <static>true</static>
+      <pose>3.2 0 0.2 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>0.6 1.2 0.4</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>0.6 1.2 0.4</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.8 0.43 0.4 1</ambient>
+            <diffuse>0.8 0.43 0.4 1</diffuse>
             <specular>0.2 0.2 0.2 1</specular>
           </material>
         </visual>

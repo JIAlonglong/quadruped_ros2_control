@@ -41,6 +41,8 @@ find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
 find_package(Python3 COMPONENTS NumPy)
 
 find_package(yaml-cpp REQUIRED)
+list(APPEND CMAKE_PREFIX_PATH "/opt/unitree_robotics")
+find_package(unitree_sdk2 REQUIRED)
 
 set(dependencies
         pluginlib
@@ -84,10 +86,12 @@ target_include_directories(${PROJECT_NAME}
         # "/usr/local/cuda-12.9/targets/x86_64-linux/include/nvtx3"
         PRIVATE
         ${YAML_CPP_INCLUDE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../hardwares/unitree_mujoco/simulate/src
         src)
 target_link_libraries(${PROJECT_NAME} PUBLIC
         "${TORCH_LIBRARIES}"
         yaml-cpp
+        unitree_sdk2
         # /home/jialonglong/libtorch/lib/libnvToolsExt-847d78f2.so.1
 )
 ament_target_dependencies(

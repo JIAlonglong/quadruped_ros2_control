@@ -172,6 +172,7 @@ def launch_setup(context, *args, **kwargs):
     )
 
     return env_actions + [
+        SetEnvironmentVariable(name="DEPTH_INPUT_SOURCE", value="dds"),
         # Keep ROS2 domain aligned with the simulator/domain used for bringup.
         SetEnvironmentVariable(name="ROS_DOMAIN_ID", value=unitree_mujoco_domain),
         # Unitree SDK2 uses CycloneDDS internally (ddsc). Override any bad inherited config (e.g. eth2)
@@ -227,7 +228,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "unitree_mujoco_sim_bin",
-            default_value="/home/jialonglong/Quadruped_ws/src/quadruped_ros2_control/hardwares/unitree_mujoco/simulate/build/unitree_mujoco",
+            default_value="/home/jialonglong/Quadruped_ws/build/unitree_mujoco/unitree_mujoco",
             description="Path to unitree_mujoco C++ simulator binary.",
         ),
         DeclareLaunchArgument(

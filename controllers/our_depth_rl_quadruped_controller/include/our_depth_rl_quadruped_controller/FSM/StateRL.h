@@ -16,6 +16,8 @@
 #include <mutex>
 #include <atomic>
 #include <functional>
+#include <unitree/robot/channel/channel_subscriber.hpp>
+#include "msg/DepthImage_.hpp"
 #include "controller_common/FSM/FSMState.h"
 #include "std_msgs/msg/float32_multi_array.hpp"
 
@@ -165,12 +167,20 @@ struct ModelParams
         int depth_crop_right = 0;
         int depth_update_interval = 1;
         int depth_feature_dim;
+        int depth_rnn_hidden_size = 512;
         bool use_depth_cnn;
         std::string depth_cnn_model;
         double depth_yaw_clip;
         double depth_yaw_alpha;
         // 深度预处理/更新频率（对齐 Extreme-Parkour-Onboard）
         bool depth_preprocess_onboard = false;
+        std::string depth_input_source = "ros";
+        std::string depth_ros_topic = "/rgbd_d435/depth_image";
+        std::string depth_rgb_topic = "/rgbd_d435/image";
+        int depth_dds_domain = 1;
+        std::string depth_dds_interface = "lo";
+        std::string depth_dds_topic = "rt/depthimage";
+        bool depth_dds_normalized = true;
         bool publish_contact_states = false;
         std::string contact_states_topic = "/our_depth_rl/contact_states";
         bool publish_foot_force_debug = false;
@@ -181,6 +191,8 @@ struct ModelParams
         int proprio_log_interval_ms = 2000;
         bool publish_yaw_diff = false;
         std::string yaw_diff_topic = "/our_depth_rl/yaw_diff";
+        bool publish_yaw_flip_debug = false;
+        std::string yaw_flip_debug_topic = "/our_depth_rl/yaw_flip_debug";
         /// 若为 true，每步发布 history 各段均值到 history_order_debug_topic，用于检验顺序 [最旧,…,最新]
         bool publish_history_order_debug = false;
         std::string history_order_debug_topic = "/our_depth_rl/history_order_debug";
@@ -272,6 +284,8 @@ private:
 
     // 处理深度图像
     torch::Tensor preprocessDepthImage(const sensor_msgs::msg::Image::SharedPtr msg);
+    torch::Tensor preprocessDepthBuffer(const std::vector<float>& data, int width, int height, bool normalized);
+    void depthDdsMessageHandle(const void *messages);
     
     // 加载模型和配置
     void loadYaml(const std::string& config_path);
@@ -349,6 +363,7 @@ private:
 
     // 相机相关
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr depth_image_sub_;
+    unitree::robot::ChannelSubscriberPtr<unitree_go::msg::dds_::DepthImage_> depth_image_sub_dds_;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr depth_image_pub_;
     cv::Mat depth_image_;
     std::mutex depth_mutex_;
@@ -383,6 +398,7 @@ private:
     rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr foot_force_debug_pub_;
     rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr proprio_pub_;
     rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr yaw_diff_pub_;
+    rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr yaw_flip_debug_pub_;
     rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr history_order_debug_pub_;
     rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr obs_freq_debug_pub_;
 

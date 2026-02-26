@@ -96,7 +96,6 @@
       </link>
     </model>
 
-    <!-- 高台 1（起点）：40cm 高，机器人 spawn 在此；x=-0.5～0.5，台面 z=0.4；高摩擦便于起跳/着地 -->
     <model name="platform_1">
       <static>true</static>
       <pose>0 0 0.2 0 0 0</pose>
@@ -131,15 +130,14 @@
       </link>
     </model>
 
-    <!-- 斜坡：相对原朝向旋转 90°，斜面沿 y 方向；高摩擦防打滑 -->
-    <model name="ramp">
+    <model name="platform_2">
       <static>true</static>
-      <pose>1.0 0 0.2 0.588 0 0</pose>
+      <pose>1.2 0 0.225 0 0 0</pose>
       <link name="link">
         <collision name="collision">
           <geometry>
             <box>
-              <size>0.3 0.6 0.05</size>
+              <size>1.0 2.5 0.45</size>
             </box>
           </geometry>
           <surface>
@@ -154,7 +152,41 @@
         <visual name="visual">
           <geometry>
             <box>
-              <size>0.3 0.6 0.05</size>
+              <size>1.0 2.5 0.45</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.6 0.5 0.4 1</ambient>
+            <diffuse>0.6 0.5 0.4 1</diffuse>
+            <specular>0.2 0.2 0.2 1</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="platform_3">
+      <static>true</static>
+      <pose>2.4 0 0.25 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>1.0 2.5 0.5</size>
+            </box>
+          </geometry>
+          <surface>
+            <friction>
+              <ode>
+                <mu>1.2</mu>
+                <mu2>1.2</mu2>
+              </ode>
+            </friction>
+          </surface>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>1.0 2.5 0.5</size>
             </box>
           </geometry>
           <material>
@@ -166,15 +198,14 @@
       </link>
     </model>
 
-    <!-- 高台 2：斜坡后再隔 30cm 沟壑，40cm 高台中心 x=1.99；高摩擦便于前脚扒台面、后脚蹬地 -->
-    <model name="platform_2">
+    <model name="platform_4">
       <static>true</static>
-      <pose>1.99 0 0.2 0 0 0</pose>
+      <pose>3.8 0 0.3 0 0 0</pose>
       <link name="link">
         <collision name="collision">
           <geometry>
             <box>
-              <size>1.0 2.5 0.4</size>
+              <size>1.0 2.5 0.6</size>
             </box>
           </geometry>
           <surface>
@@ -189,12 +220,12 @@
         <visual name="visual">
           <geometry>
             <box>
-              <size>1.0 2.5 0.4</size>
+              <size>1.0 2.5 0.6</size>
             </box>
           </geometry>
           <material>
-            <ambient>0.6 0.5 0.4 1</ambient>
-            <diffuse>0.6 0.5 0.4 1</diffuse>
+            <ambient>0.6 0.6 0.5 1</ambient>
+            <diffuse>0.6 0.6 0.5 1</diffuse>
             <specular>0.2 0.2 0.2 1</specular>
           </material>
         </visual>

@@ -40,12 +40,14 @@
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>  
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2/LinearMath/Matrix3x3.h>
+#include <unitree/robot/channel/channel_factory.hpp>
 #include <array>
 #include <numeric>
 #include <algorithm>
 #include <cmath>
 #include <torch/nn/functional.h>
 #include <chrono>
+#include <cstdlib>
 
 template <typename T>
 std::vector<T> ReadVectorFromYaml(const YAML::Node& node)
@@ -153,124 +155,121 @@ StateRL::StateRL(CtrlInterfaces& ctrl_interfaces,
 
     // 从 YAML 加载策略侧配置（包括模型文件名、观测布局、缩放系数、KP/KD、动作范围、相机参数等）
     loadYaml(model_path);
+    const char* depth_input_env = std::getenv("DEPTH_INPUT_SOURCE");
+    if (depth_input_env && depth_input_env[0] != '\0')
+    {
+        params_.depth_input_source = std::string(depth_input_env);
+    }
 
     // 如果启用相机：注册深度与 RGB 订阅，并把深度预处理后的张量缓存起来供推理使用
     if(params_.use_camera){
-        // 深度图像发布器
-        depth_image_pub_ = node_->create_publisher<sensor_msgs::msg::Image>("/depth_image/processed", 10);
-        
-        // RGB图像发布器
-        rgb_image_pub_ = node_->create_publisher<sensor_msgs::msg::Image>("/rgb_image/processed", 10);
-        
         // 图像走 sensor data QoS（best effort），与 MuJoCo/RealSense 常见发布策略对齐
         auto sensor_qos = rclcpp::SensorDataQoS();
-        // 深度图像订阅器
-        depth_image_sub_ = node_->create_subscription<sensor_msgs::msg::Image>(
-            "/rgbd_d435/depth_image", sensor_qos,
-            [this](const sensor_msgs::msg::Image::SharedPtr msg)
-            {
-                try {
-                    if (!msg) {
-                        return;
-                    }
-                    if (msg->data.empty() || msg->height == 0 || msg->width == 0) {
-                        return;
-                    }
-
-                    cv::Mat depth_m;
-                    if (msg->encoding == sensor_msgs::image_encodings::TYPE_32FC1 || msg->encoding == "32FC1") {
-                        depth_m = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::TYPE_32FC1)->image;
-                    } else if (msg->encoding == sensor_msgs::image_encodings::TYPE_16UC1 || msg->encoding == "16UC1") {
-                        cv::Mat depth_mm = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::TYPE_16UC1)->image;
-                        depth_mm.convertTo(depth_m, CV_32F, 0.001);
-                    } else {
-                        RCLCPP_WARN(rclcpp::get_logger("StateRL"), "Unsupported depth image encoding: %s", msg->encoding.c_str());
-                        return;
-                    }
-                    if (depth_m.empty()) {
-                        return;
-                    }
-
-                    (void)preprocessDepthImage(msg);
-
-                    const float far_clip = std::max(1e-6f, static_cast<float>(params_.max_depth));
-                    cv::Mat invalid_mask_raw = depth_m <= 1e-6f;
-                    const int invalid_count_raw = cv::countNonZero(invalid_mask_raw);
-                    const int total_count_raw = depth_m.rows * depth_m.cols;
-                    const float invalid_ratio_raw = total_count_raw > 0
-                                                   ? static_cast<float>(invalid_count_raw) / static_cast<float>(total_count_raw)
-                                                   : 1.0f;
-                    // 深度帧几乎全无效时不更新可视化，避免“黑屏”覆盖上一帧
-                    if (invalid_ratio_raw > 0.98f)
-                    {
-                        RCLCPP_WARN_THROTTLE(
-                            rclcpp::get_logger("StateRL"), *node_->get_clock(), 1000,
-                            "Depth frame mostly invalid (%.1f%%), skip visualization publish.",
-                            invalid_ratio_raw * 100.0f);
-                        return;
-                    }
-
-                    cv::Mat depth_vis = depth_m.clone();
-                    cv::medianBlur(depth_vis, depth_vis, 5);
-                    cv::patchNaNs(depth_vis, far_clip);
-                    cv::max(depth_vis, 0.0, depth_vis);
-                    cv::min(depth_vis, far_clip, depth_vis);
-                    cv::Mat invalid_mask = depth_vis <= 1e-6f;
-                    // 可视化里把无效值设为 far_clip（白色），便于观察有效区域
-                    depth_vis.setTo(far_clip, invalid_mask);
-
-                    double min_val = 0.0;
-                    double max_val = 0.0;
-                    cv::minMaxLoc(depth_vis, &min_val, &max_val);
-                    const int invalid_count = cv::countNonZero(invalid_mask);
-                    const int total_count = depth_vis.rows * depth_vis.cols;
-                    RCLCPP_DEBUG_THROTTLE(
-                        rclcpp::get_logger("StateRL"), *node_->get_clock(), 2000,
-                        "Depth vis stats: min=%.3f max=%.3f far=%.3f invalid=%d/%d enc=%s",
-                        min_val, max_val, far_clip, invalid_count, total_count, msg->encoding.c_str());
-
-                    cv_bridge::CvImage img_msg;
-                    img_msg.header = msg->header;
-                    img_msg.encoding = sensor_msgs::image_encodings::MONO8;
-                    cv::Mat depth_u8;
-                    depth_vis.convertTo(depth_u8, CV_8U, 255.0f / far_clip);
-                    img_msg.image = depth_u8;
-                    depth_image_pub_->publish(*img_msg.toImageMsg());
-
-                } catch (const cv_bridge::Exception& e) {
-                    RCLCPP_ERROR(rclcpp::get_logger("StateRL"), "cv_bridge异常: %s", e.what());
-                } catch (const std::exception& e) {
-                    RCLCPP_ERROR(rclcpp::get_logger("StateRL"), "处理深度图像时出错: %s", e.what());
-                }
-            }
-        );
+        // 深度图像发布器
+        depth_image_pub_ = node_->create_publisher<sensor_msgs::msg::Image>("/depth_image/processed", sensor_qos);
         
-        // RGB图像订阅器
-        rgb_image_sub_ = node_->create_subscription<sensor_msgs::msg::Image>(
-            "/rgbd_d435/image", sensor_qos,
-            [this](const sensor_msgs::msg::Image::SharedPtr msg)
+        // RGB图像发布器
+        rgb_image_pub_ = node_->create_publisher<sensor_msgs::msg::Image>("/rgb_image/processed", sensor_qos);
+        if (params_.depth_input_source == "dds")
+        {
+            static std::once_flag dds_init_once;
+            std::call_once(dds_init_once, [this]()
             {
-                try {
-                    std::lock_guard<std::mutex> lock(rgb_mutex_);
-                    // RGB 图像仅用于可视化：直接转 OpenCV 后转回 ROS 消息发布
-                    rgb_image_ = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::BGR8)->image;
-                    
-                    // 发布RGB图像用于直接显示
-                    cv_bridge::CvImage img_msg;
-                    img_msg.header = msg->header;
-                    img_msg.encoding = sensor_msgs::image_encodings::BGR8;
-                    img_msg.image = rgb_image_;
-                    rgb_image_pub_->publish(*img_msg.toImageMsg());
-                    
-                } catch (const cv_bridge::Exception& e) {
-                    RCLCPP_ERROR(rclcpp::get_logger("StateRL"), "cv_bridge异常: %s", e.what());
-                } catch (const std::exception& e) {
-                    RCLCPP_ERROR(rclcpp::get_logger("StateRL"), "处理RGB图像时出错: %s", e.what());
+                unitree::robot::ChannelFactory::Instance()->Init(params_.depth_dds_domain, params_.depth_dds_interface);
+            });
+            depth_image_sub_dds_ =
+                std::make_shared<unitree::robot::ChannelSubscriber<unitree_go::msg::dds_::DepthImage_>>(
+                    params_.depth_dds_topic);
+            depth_image_sub_dds_->InitChannel(
+                [this](auto&& PH1)
+                {
+                    depthDdsMessageHandle(std::forward<decltype(PH1)>(PH1));
+                },
+                1);
+            RCLCPP_INFO(
+                rclcpp::get_logger("StateRL"),
+                "DDS depth subscriber initialized: topic=%s domain=%d interface=%s",
+                params_.depth_dds_topic.c_str(),
+                params_.depth_dds_domain,
+                params_.depth_dds_interface.c_str());
+        }
+        else
+        {
+            depth_image_sub_ = node_->create_subscription<sensor_msgs::msg::Image>(
+                params_.depth_ros_topic, sensor_qos,
+                [this](const sensor_msgs::msg::Image::SharedPtr msg)
+                {
+                    try {
+                        if (!msg) {
+                            return;
+                        }
+                        if (msg->data.empty() || msg->height == 0 || msg->width == 0) {
+                            return;
+                        }
+
+                        const torch::Tensor depth_tensor = preprocessDepthImage(msg);
+                        if (!depth_tensor.defined() || depth_tensor.numel() == 0) {
+                            return;
+                        }
+
+                        torch::Tensor frame;
+                        if (depth_tensor.dim() == 4) {
+                            frame = depth_tensor.index({0, 0});
+                        } else if (depth_tensor.dim() == 5) {
+                            const int64_t last_idx = std::max<int64_t>(0, depth_tensor.size(1) - 1);
+                            frame = depth_tensor.index({0, last_idx, 0});
+                        } else if (depth_tensor.dim() == 3) {
+                            frame = depth_tensor.index({0});
+                        } else {
+                            return;
+                        }
+
+                        torch::Tensor u8 = frame.clamp(-0.5f, 0.5f).add(0.5f).mul(255.0f).to(torch::kUInt8).contiguous();
+                        const int height = static_cast<int>(u8.size(0));
+                        const int width = static_cast<int>(u8.size(1));
+                        if (height <= 0 || width <= 0) {
+                            return;
+                        }
+                        cv::Mat depth_u8(height, width, CV_8UC1, u8.data_ptr<uint8_t>());
+
+                        cv_bridge::CvImage img_msg;
+                        img_msg.header = msg->header;
+                        img_msg.encoding = sensor_msgs::image_encodings::MONO8;
+                        img_msg.image = depth_u8.clone();
+                        depth_image_pub_->publish(*img_msg.toImageMsg());
+
+                    } catch (const cv_bridge::Exception& e) {
+                        RCLCPP_ERROR(rclcpp::get_logger("StateRL"), "cv_bridge异常: %s", e.what());
+                    } catch (const std::exception& e) {
+                        RCLCPP_ERROR(rclcpp::get_logger("StateRL"), "处理深度图像时出错: %s", e.what());
+                    }
                 }
-            }
-        );
+            );
+
+            rgb_image_sub_ = node_->create_subscription<sensor_msgs::msg::Image>(
+                params_.depth_rgb_topic, sensor_qos,
+                [this](const sensor_msgs::msg::Image::SharedPtr msg)
+                {
+                    try {
+                        std::lock_guard<std::mutex> lock(rgb_mutex_);
+                        rgb_image_ = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::BGR8)->image;
+                        
+                        cv_bridge::CvImage img_msg;
+                        img_msg.header = msg->header;
+                        img_msg.encoding = sensor_msgs::image_encodings::BGR8;
+                        img_msg.image = rgb_image_;
+                        rgb_image_pub_->publish(*img_msg.toImageMsg());
+                        
+                    } catch (const cv_bridge::Exception& e) {
+                        RCLCPP_ERROR(rclcpp::get_logger("StateRL"), "cv_bridge异常: %s", e.what());
+                    } catch (const std::exception& e) {
+                        RCLCPP_ERROR(rclcpp::get_logger("StateRL"), "处理RGB图像时出错: %s", e.what());
+                    }
+                }
+            );
+        }
         
-        RCLCPP_INFO(node_->get_logger(), "Depth and RGB camera subscriptions initialized");
+        RCLCPP_INFO(node_->get_logger(), "Depth input source: %s", params_.depth_input_source.c_str());
     }
 
     if (params_.publish_contact_states)
@@ -298,6 +297,14 @@ StateRL::StateRL(CtrlInterfaces& ctrl_interfaces,
             params_.yaw_diff_topic, 10);
         RCLCPP_DEBUG(node_->get_logger(), "Yaw diff publisher: %s (data: [manual_yaw, policy_yaw, diff])",
             params_.yaw_diff_topic.c_str());
+    }
+    if (params_.publish_yaw_flip_debug)
+    {
+        yaw_flip_debug_pub_ = node_->create_publisher<std_msgs::msg::Float32MultiArray>(
+            params_.yaw_flip_debug_topic, 10);
+        RCLCPP_DEBUG(node_->get_logger(),
+            "Yaw flip debug publisher: %s (data: [manual_yaw, policy_yaw, policy_yaw_flip, diff, diff_flip])",
+            params_.yaw_flip_debug_topic.c_str());
     }
     if (params_.publish_history_order_debug && params_.num_hist_len > 0)
     {
@@ -792,12 +799,24 @@ void StateRL::loadYaml(const std::string& config_path)
     params_.proprio_log_interval_ms = config["proprio_log_interval_ms"].as<int>(2000);
     params_.publish_yaw_diff = config["publish_yaw_diff"].as<bool>(false);
     params_.yaw_diff_topic = config["yaw_diff_topic"].as<std::string>("/our_depth_rl/yaw_diff");
+    params_.publish_yaw_flip_debug = config["publish_yaw_flip_debug"].as<bool>(false);
+    params_.yaw_flip_debug_topic = config["yaw_flip_debug_topic"].as<std::string>("/our_depth_rl/yaw_flip_debug");
     params_.publish_history_order_debug = config["publish_history_order_debug"].as<bool>(false);
     params_.history_order_debug_topic = config["history_order_debug_topic"].as<std::string>("/our_depth_rl/history_order_debug");
     params_.publish_obs_freq_debug = config["publish_obs_freq_debug"].as<bool>(false);
     params_.obs_freq_debug_topic = config["obs_freq_debug_topic"].as<std::string>("/our_depth_rl/obs_freq_debug");
     if (params_.use_camera)
     {
+        params_.depth_input_source = config["depth_input_source"].as<std::string>("ros");
+        params_.depth_ros_topic = config["depth_ros_topic"].as<std::string>("/rgbd_d435/depth_image");
+        params_.depth_rgb_topic = config["depth_rgb_topic"].as<std::string>("/rgbd_d435/image");
+        params_.depth_dds_domain = config["depth_dds_domain"].as<int>(1);
+        params_.depth_dds_interface = config["depth_dds_interface"].as<std::string>("lo");
+        params_.depth_dds_topic = config["depth_dds_topic"].as<std::string>("rt/depthimage");
+        params_.depth_dds_normalized = config["depth_dds_normalized"].as<bool>(true);
+        if (params_.depth_input_source != "dds") {
+            params_.depth_input_source = "ros";
+        }
         params_.depth_width = config["depth_width"].as<int>(58);   // 与 Python 中的 58x87 保持一致
         params_.depth_height = config["depth_height"].as<int>(87);
         params_.max_depth = config["max_depth"].as<double>(2.0);   // 有效深度范围上限
@@ -817,6 +836,8 @@ void StateRL::loadYaml(const std::string& config_path)
         // Extreme Parkour 的 TorchScript 视觉骨干输出 32 维 latent + 2 维偏航
         // 允许从 config.yaml 覆盖，便于不同模型复用
         params_.depth_feature_dim = config["depth_feature_dim"].as<int>(32);
+        params_.depth_rnn_hidden_size = config["depth_rnn_hidden_size"].as<int>(512);
+        if (params_.depth_rnn_hidden_size < 1) params_.depth_rnn_hidden_size = 1;
         
         if (params_.use_depth_cnn)
         {
@@ -1371,25 +1392,23 @@ torch::Tensor StateRL::updateDepthLatentAndYaw(torch::Tensor& proprio_inout,
                 if (latest_depth_copy.dim() == 5 && latest_depth_copy.size(1) == 1)
                     latest_depth_copy = latest_depth_copy.squeeze(1);
                 if (latest_depth_copy.dim() == 4)
-                    latest_depth_copy = latest_depth_copy.index({torch::indexing::Slice(), -1, torch::indexing::Slice(), torch::indexing::Slice()});
+                {
+                    if (params_.depth_buffer_len <= 1)
+                        latest_depth_copy = latest_depth_copy.index({torch::indexing::Slice(), -1, torch::indexing::Slice(), torch::indexing::Slice()});
+                }
                 else if (latest_depth_copy.dim() == 2)
                     latest_depth_copy = latest_depth_copy.unsqueeze(0);
-                if (latest_depth_copy.dim() != 3)
+                if (latest_depth_copy.dim() != 3 && latest_depth_copy.dim() != 4)
                 {
                     RCLCPP_WARN_THROTTLE(rclcpp::get_logger("StateRL"), *node_->get_clock(), 2000,
-                                         "Depth tensor dim unexpected: %ld (expect 3). Skip depth encoder.", static_cast<long>(latest_depth_copy.dim()));
+                                         "Depth tensor dim unexpected: %ld (expect 3 or 4). Skip depth encoder.", static_cast<long>(latest_depth_copy.dim()));
                     latest_depth_copy = torch::Tensor();
                 }
                 if (latest_depth_copy.defined() && latest_depth_copy.numel() > 0)
                 {
-                    if (latest_depth_copy.dim() == 4 && latest_depth_copy.size(0) == 1)
-                        latest_depth_copy = latest_depth_copy.index({0, -1}).unsqueeze(0);
-
-                    // 初始化 GRU hidden state（首次调用时）
-                    // GRU 参数：num_layers=1, batch=1, hidden_size=512
                     if (!depth_gru_hidden_initialized_ || !depth_gru_hidden_.defined())
                     {
-                        depth_gru_hidden_ = torch::zeros({1, 1, 512}, options);
+                        depth_gru_hidden_ = torch::zeros({1, 1, params_.depth_rnn_hidden_size}, options);
                         depth_gru_hidden_initialized_ = true;
                     }
 
@@ -1397,21 +1416,21 @@ torch::Tensor StateRL::updateDepthLatentAndYaw(torch::Tensor& proprio_inout,
                     depth_inputs.emplace_back(latest_depth_copy.to(device_));
                     depth_inputs.emplace_back(proprio_inout);
                     depth_inputs.emplace_back(depth_gru_hidden_.to(device_));
+                    torch::IValue forward_result = depth_encoder_module_.forward(depth_inputs);
 
-                    // vision_stateful_jit.pt 返回 tuple(depth_output, new_hidden)
-                    auto forward_result = depth_encoder_module_.forward(depth_inputs);
                     torch::Tensor depth_output;
                     if (forward_result.isTuple())
                     {
-                        // stateful 模型：(output [1, 34], new_hidden [1, 1, 512])
                         auto tuple_elements = forward_result.toTuple()->elements();
                         depth_output = sanitize_tensor(tuple_elements[0].toTensor());
-                        depth_gru_hidden_ = tuple_elements[1].toTensor().to(torch::kCPU);
+                        if (tuple_elements.size() > 1)
+                        {
+                            depth_gru_hidden_ = tuple_elements[1].toTensor().to(torch::kCPU);
+                        }
                     }
                     else
                     {
-                        // 兼容旧版 vision_jit.pt（无 state，返回单个 tensor）
-                        depth_output = sanitize_tensor(forward_result.toTensor());
+                        throw std::runtime_error("Depth encoder output is not tuple; stateful vision model required.");
                     }
                     if (depth_output.sizes().size() == 2 && depth_output.size(0) == 1 && depth_output.size(1) >= params_.depth_feature_dim + 2)
                     {
@@ -1447,6 +1466,51 @@ torch::Tensor StateRL::updateDepthLatentAndYaw(torch::Tensor& proprio_inout,
                             msg.data = {manual_yaw_scaled, policy_yaw, manual_yaw_scaled - policy_yaw};
                             yaw_diff_pub_->publish(msg);
                         }
+                        if (params_.publish_yaw_flip_debug && yaw_flip_debug_pub_)
+                        {
+                            torch::Tensor depth_input_flip = latest_depth_copy;
+                            if (depth_input_flip.defined())
+                            {
+                                const int64_t dim = depth_input_flip.dim() - 1;
+                                if (dim >= 0)
+                                {
+                                    depth_input_flip = torch::flip(depth_input_flip, {dim});
+                                }
+                            }
+
+                            std::vector<torch::jit::IValue> depth_inputs_flip;
+                            depth_inputs_flip.emplace_back(depth_input_flip.to(device_));
+                            depth_inputs_flip.emplace_back(proprio_inout);
+                            depth_inputs_flip.emplace_back(depth_gru_hidden_.to(device_));
+                            auto forward_result_flip = depth_encoder_module_.forward(depth_inputs_flip);
+                            torch::Tensor depth_output_flip;
+                            if (forward_result_flip.isTuple())
+                            {
+                                auto tuple_elements_flip = forward_result_flip.toTuple()->elements();
+                                depth_output_flip = sanitize_tensor(tuple_elements_flip[0].toTensor());
+                            }
+                            else
+                            {
+                                depth_output_flip = sanitize_tensor(forward_result_flip.toTensor());
+                            }
+
+                            const float manual_yaw_scaled = static_cast<float>(std::clamp(control_.yaw * params_.delta_yaw_scale, -params_.depth_yaw_clip, params_.depth_yaw_clip));
+                            const float yaw_clip_f = static_cast<float>(params_.depth_yaw_clip);
+                            torch::Tensor policy_yaw_raw = sanitize_tensor(depth_output.index({0, torch::indexing::Slice(params_.depth_feature_dim, params_.depth_feature_dim + 2)}).unsqueeze(0) * 1.5f);
+                            torch::Tensor policy_yaw_raw_flip = sanitize_tensor(depth_output_flip.index({0, torch::indexing::Slice(params_.depth_feature_dim, params_.depth_feature_dim + 2)}).unsqueeze(0) * 1.5f);
+                            float policy_yaw = std::clamp(policy_yaw_raw[0][0].item<float>(), -yaw_clip_f, yaw_clip_f);
+                            float policy_yaw_flip = std::clamp(policy_yaw_raw_flip[0][0].item<float>(), -yaw_clip_f, yaw_clip_f);
+
+                            std_msgs::msg::Float32MultiArray msg;
+                            msg.data = {
+                                manual_yaw_scaled,
+                                policy_yaw,
+                                policy_yaw_flip,
+                                manual_yaw_scaled - policy_yaw,
+                                manual_yaw_scaled - policy_yaw_flip
+                            };
+                            yaw_flip_debug_pub_->publish(msg);
+                        }
                     }
                     else
                         RCLCPP_WARN_THROTTLE(rclcpp::get_logger("StateRL"), *node_->get_clock(), 2000, "Depth encoder output shape unexpected.");
@@ -1457,6 +1521,14 @@ torch::Tensor StateRL::updateDepthLatentAndYaw(torch::Tensor& proprio_inout,
                     const double depth_ms = std::chrono::duration<double, std::milli>(t_depth_end - t_depth_start).count();
                     latency_depth_ms_ema_ = latency_ema_initialized_ ? (0.9 * latency_depth_ms_ema_ + 0.1 * depth_ms) : depth_ms;
                 }
+                RCLCPP_INFO_THROTTLE(
+                    rclcpp::get_logger("StateRL"),
+                    *node_->get_clock(),
+                    2000,
+                    "Depth encoder ran: depth_ok=%s, should_update=%s, has_depth=%s",
+                    depth_ok ? "true" : "false",
+                    should_update_depth ? "true" : "false",
+                    latest_depth_copy.defined() && latest_depth_copy.numel() > 0 ? "true" : "false");
             }
         }
         catch (const std::exception& e)
@@ -1468,6 +1540,18 @@ torch::Tensor StateRL::updateDepthLatentAndYaw(torch::Tensor& proprio_inout,
     {
         RCLCPP_WARN_THROTTLE(rclcpp::get_logger("StateRL"), *node_->get_clock(), 1000,
                              "Depth invalid -> skip depth encoder (depth_latent=zeros) for stability.");
+    }
+    else if (params_.use_camera && params_.use_depth_cnn && depth_model_loaded_)
+    {
+        const bool has_depth = latest_depth_tensor_.defined() && latest_depth_tensor_.numel() > 0;
+        RCLCPP_INFO_THROTTLE(
+            rclcpp::get_logger("StateRL"),
+            *node_->get_clock(),
+            2000,
+            "Depth encoder skipped: depth_ok=%s, should_update=%s, has_depth=%s",
+            depth_ok ? "true" : "false",
+            should_update_depth ? "true" : "false",
+            has_depth ? "true" : "false");
     }
     obs_.depth_latent = depth_latent.to(torch::kCPU);
     last_depth_latent_ = obs_.depth_latent.clone();
@@ -1644,6 +1728,21 @@ void StateRL::runModel()
         RCLCPP_WARN_THROTTLE(rclcpp::get_logger("StateRL"), *node_->get_clock(), 2000,
                              "Policy module not loaded, skip runModel.");
         return;
+    }
+    if (params_.use_camera && params_.depth_input_source == "dds" && depth_image_sub_dds_)
+    {
+        const int64_t last_time = depth_image_sub_dds_->GetLastDataAvailableTime();
+        if (last_time < 0)
+        {
+            RCLCPP_WARN_THROTTLE(
+                rclcpp::get_logger("StateRL"),
+                *node_->get_clock(),
+                2000,
+                "DDS depth not received yet (topic=%s domain=%d interface=%s)",
+                params_.depth_dds_topic.c_str(),
+                params_.depth_dds_domain,
+                params_.depth_dds_interface.c_str());
+        }
     }
     publishObsFreqDebug();
 
@@ -1915,14 +2014,15 @@ torch::Tensor StateRL::preprocessDepthImage(const sensor_msgs::msg::Image::Share
         cv::max(cropped, 0.0, cropped);
         cv::min(cropped, max_depth_m, cropped);
 
-        // 4) 先 resize 再归一化，与训练一致（legged_robot.py: resize_transform 再 normalize_depth_image）
-        // Onboard Python 使用 F.adaptive_avg_pool2d；INTER_AREA 是 OpenCV 中等价的下采样方法
-        cv::Mat resized;
-        cv::resize(cropped, resized, cv::Size(target_width, target_height), 0, 0, cv::INTER_AREA);
         torch::Tensor depth_tensor = torch::from_blob(
-            resized.data, {resized.rows, resized.cols}, torch::kFloat32).clone();
-        depth_tensor = depth_tensor.unsqueeze(0);  // [1,H,W]
-        depth_tensor = depth_tensor / static_cast<float>(std::max(1e-6, max_depth_m)) - 0.5f;
+            cropped.data, {cropped.rows, cropped.cols}, torch::kFloat32).clone();
+        depth_tensor = depth_tensor.unsqueeze(0).unsqueeze(0);  // [1,1,H,W]
+        depth_tensor = depth_tensor / static_cast<float>(std::max(1e-6, max_depth_m));
+        depth_tensor = torch::nn::functional::adaptive_avg_pool2d(
+            depth_tensor,
+            torch::nn::functional::AdaptiveAvgPool2dFuncOptions({target_height, target_width}));
+        depth_tensor = depth_tensor.squeeze(0);  // [1,H,W]
+        depth_tensor = depth_tensor - 0.5f;
 
         torch::Tensor depth_frame = depth_tensor;
 
@@ -1955,7 +2055,14 @@ torch::Tensor StateRL::preprocessDepthImage(const sensor_msgs::msg::Image::Share
                 frames.reserve(depth_buffer_.size());
                 for (const auto& f : depth_buffer_)
                 {
-                    frames.push_back(f);
+                    if (f.dim() == 3 && f.size(0) == 1)
+                    {
+                        frames.push_back(f.squeeze(0));
+                    }
+                    else
+                    {
+                        frames.push_back(f);
+                    }
                 }
                 latest_depth_tensor_ = torch::stack(frames, 0).unsqueeze(0).clone();
             }
@@ -1966,5 +2073,199 @@ torch::Tensor StateRL::preprocessDepthImage(const sensor_msgs::msg::Image::Share
     } catch (const std::exception& e) {
         RCLCPP_ERROR(rclcpp::get_logger("StateRL"), "Exception in preprocessDepthImage: %s", e.what());
         return torch::zeros({1, target_height, target_width}, torch::kFloat32);
+    }
+}
+
+torch::Tensor StateRL::preprocessDepthBuffer(const std::vector<float>& data, int width, int height, bool normalized) {
+    const int target_height = params_.depth_height > 0 ? params_.depth_height : 58;
+    const int target_width = params_.depth_width > 0 ? params_.depth_width : 87;
+    try {
+        if (data.empty() || width <= 0 || height <= 0) {
+            return torch::zeros({1, target_height, target_width}, torch::kFloat32);
+        }
+        const size_t expected = static_cast<size_t>(width) * static_cast<size_t>(height);
+        if (data.size() < expected) {
+            return torch::zeros({1, target_height, target_width}, torch::kFloat32);
+        }
+
+        cv::Mat depth_m(height, width, CV_32FC1, const_cast<float*>(data.data()));
+        depth_m = depth_m.clone();
+
+        const double max_depth_m = std::max(1e-6, params_.max_depth);
+        if (normalized) {
+            depth_m = depth_m * static_cast<float>(max_depth_m);
+        }
+
+        double max_val = 0.0;
+        cv::minMaxLoc(depth_m, nullptr, &max_val);
+        if (max_val > 20.0) {
+            depth_m = depth_m * 0.001f;
+        }
+
+        cv::patchNaNs(depth_m, static_cast<float>(max_depth_m));
+
+        {
+            cv::Mat invalid_mask = depth_m <= 1e-6f;
+            const int invalid_cnt = cv::countNonZero(invalid_mask);
+            const int total_cnt = depth_m.rows * depth_m.cols;
+            const float invalid_ratio = total_cnt > 0 ? static_cast<float>(invalid_cnt) / static_cast<float>(total_cnt) : 1.0f;
+            if (invalid_ratio > 0.98f) {
+                RCLCPP_WARN_THROTTLE(
+                    rclcpp::get_logger("StateRL"), *node_->get_clock(), 1000,
+                    "Depth frame mostly invalid (%.1f%%). Keeping last cached depth tensor.",
+                    invalid_ratio * 100.0f);
+                std::lock_guard<std::mutex> lock(depth_mutex_);
+                if (latest_depth_tensor_.defined() && latest_depth_tensor_.numel() > 0) {
+                    last_depth_frame_valid_.store(true);
+                    return latest_depth_tensor_.to(torch::kCPU);
+                }
+                last_depth_frame_valid_.store(false);
+            } else {
+                last_depth_frame_valid_.store(true);
+            }
+        }
+
+        int top = std::max(0, params_.depth_crop_top);
+        int bottom = std::max(0, params_.depth_crop_bottom);
+        int left = std::max(0, params_.depth_crop_left);
+        int right = std::max(0, params_.depth_crop_right);
+        cv::Mat cropped = depth_m;
+        if (cropped.rows > top + bottom + 1 && cropped.cols > left + right + 1)
+        {
+            const cv::Rect roi(left, top, cropped.cols - left - right, cropped.rows - top - bottom);
+            cropped = cropped(roi);
+        }
+
+        cv::max(cropped, 0.0, cropped);
+        cv::min(cropped, max_depth_m, cropped);
+
+        torch::Tensor depth_tensor = torch::from_blob(
+            cropped.data, {cropped.rows, cropped.cols}, torch::kFloat32).clone();
+        depth_tensor = depth_tensor.unsqueeze(0).unsqueeze(0);
+        depth_tensor = depth_tensor / static_cast<float>(std::max(1e-6, max_depth_m));
+        depth_tensor = torch::nn::functional::adaptive_avg_pool2d(
+            depth_tensor,
+            torch::nn::functional::AdaptiveAvgPool2dFuncOptions({target_height, target_width}));
+        depth_tensor = depth_tensor.squeeze(0);
+        depth_tensor = depth_tensor - 0.5f;
+
+        torch::Tensor depth_frame = depth_tensor;
+
+        {
+            std::lock_guard<std::mutex> lock(depth_mutex_);
+            const int n = std::max(1, params_.depth_buffer_len);
+            depth_buffer_.push_back(depth_frame);
+            while (static_cast<int>(depth_buffer_.size()) > n)
+            {
+                depth_buffer_.pop_front();
+            }
+            while (static_cast<int>(depth_buffer_.size()) < n)
+            {
+                depth_buffer_.push_front(depth_frame);
+            }
+
+            if (n == 1)
+            {
+                latest_depth_tensor_ = depth_buffer_.back().unsqueeze(0).clone();
+            }
+            else
+            {
+                std::vector<torch::Tensor> frames;
+                frames.reserve(depth_buffer_.size());
+                for (const auto& f : depth_buffer_)
+                {
+                    if (f.dim() == 3 && f.size(0) == 1)
+                    {
+                        frames.push_back(f.squeeze(0));
+                    }
+                    else
+                    {
+                        frames.push_back(f);
+                    }
+                }
+                latest_depth_tensor_ = torch::stack(frames, 0).unsqueeze(0).clone();
+            }
+        }
+
+        return latest_depth_tensor_.to(torch::kCPU);
+    } catch (const std::exception& e) {
+        RCLCPP_ERROR(rclcpp::get_logger("StateRL"), "Exception in preprocessDepthBuffer: %s", e.what());
+        return torch::zeros({1, target_height, target_width}, torch::kFloat32);
+    }
+}
+
+void StateRL::depthDdsMessageHandle(const void *messages)
+{
+    try {
+        if (!messages) {
+            return;
+        }
+        const auto* msg = static_cast<const unitree_go::msg::dds_::DepthImage_*>(messages);
+        const int width = static_cast<int>(msg->width());
+        const int height = static_cast<int>(msg->height());
+        const auto& values = msg->normalized_value();
+        if (width <= 0 || height <= 0 || values.empty()) {
+            return;
+        }
+        const size_t expected = static_cast<size_t>(width) * static_cast<size_t>(height);
+        if (values.size() < expected) {
+            RCLCPP_WARN_THROTTLE(
+                rclcpp::get_logger("StateRL"),
+                *node_->get_clock(),
+                2000,
+                "DDS depth size mismatch: width=%d height=%d values=%zu expected=%zu",
+                width,
+                height,
+                values.size(),
+                expected);
+            return;
+        }
+
+        static int64_t dds_depth_count = 0;
+        dds_depth_count += 1;
+        RCLCPP_INFO_THROTTLE(
+            rclcpp::get_logger("StateRL"),
+            *node_->get_clock(),
+            2000,
+            "DDS depth recv: %dx%d, normalized=%s, count=%lld",
+            width,
+            height,
+            params_.depth_dds_normalized ? "true" : "false",
+            static_cast<long long>(dds_depth_count));
+
+        const torch::Tensor depth_tensor = preprocessDepthBuffer(values, width, height, params_.depth_dds_normalized);
+        if (!depth_tensor.defined() || depth_tensor.numel() == 0) {
+            return;
+        }
+
+        torch::Tensor frame;
+        if (depth_tensor.dim() == 4) {
+            frame = depth_tensor.index({0, 0});
+        } else if (depth_tensor.dim() == 5) {
+            const int64_t last_idx = std::max<int64_t>(0, depth_tensor.size(1) - 1);
+            frame = depth_tensor.index({0, last_idx, 0});
+        } else if (depth_tensor.dim() == 3) {
+            frame = depth_tensor.index({0});
+        } else {
+            return;
+        }
+
+        torch::Tensor u8 = frame.clamp(-0.5f, 0.5f).add(0.5f).mul(255.0f).to(torch::kUInt8).contiguous();
+        const int out_h = static_cast<int>(u8.size(0));
+        const int out_w = static_cast<int>(u8.size(1));
+        if (out_h <= 0 || out_w <= 0) {
+            return;
+        }
+        cv::Mat depth_u8(out_h, out_w, CV_8UC1, u8.data_ptr<uint8_t>());
+
+        if (depth_image_pub_) {
+            cv_bridge::CvImage img_msg;
+            img_msg.header.stamp = node_->get_clock()->now();
+            img_msg.encoding = sensor_msgs::image_encodings::MONO8;
+            img_msg.image = depth_u8.clone();
+            depth_image_pub_->publish(*img_msg.toImageMsg());
+        }
+    } catch (const std::exception& e) {
+        RCLCPP_ERROR(rclcpp::get_logger("StateRL"), "Depth DDS handler error: %s", e.what());
     }
 }

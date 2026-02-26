@@ -8,7 +8,10 @@
 # 校验脚本: check_config_alignment.py（C++ config vs traced/config.json）
 # ===================== 策略主文件配置 =====================
 # baseline
-model_name: "base_jit.pt"
+model_name: "student-005-noesm-700-base_jit.pt"
+# our_baseline
+# model_name: "base_jit.pt"
+# model_name: "baseline_student-26500-base_jit.pt"
 framework: "isaacgym"
 rows: 4
 cols: 3
@@ -53,7 +56,7 @@ hip_scale_reduction: 1.0
 hip_scale_reduction_indices: [ 0, 3, 6, 9 ]
 num_of_dofs: 12
 # 策略输出缩放；必须与训练一致（legged_robot.py go2_original_parkour：action_scale=0.25）
-action_scale: 0.25
+action_scale: 0.27
 # 关节顺序重排：ROS 顺序 -> 策略/仿真顺序（FR, FL, RR, RL）
 # ROS joints: [FL, FR, RL, RR] -> policy order: [FR, FL, RR, RL]
 dof_reindex: [ 3, 4, 5,
@@ -81,8 +84,7 @@ delta_yaw_scale: 0.15  # 偏航角增量缩放（键盘 J/L）；减小则转向
 # 足端接触力阈值（单位取决于硬件接口）：
 #   Gazebo / MuJoCo（force-torque sensor, 单位 N）：2.0 与训练 norm(contact_forces)>2 对齐
 #   实机（Unitree Go2 foot_force, 原始传感器值）：25，与 Onboard Python 对齐
-foot_force_threshold: 2.0     # ← MuJoCo/Gazebo 仿真用这个（touch sensor 单位为 N）
-# foot_force_threshold: 25.0  # ← 实机 Go2 用这个
+foot_force_threshold: 25.0
 # 与训练一致：contact_filt = contact OR last_contacts，避免接触状态高频闪烁
 contact_use_last: true
 # Estimator 安全检查（roll/pitch 超限自动切回 FIXEDSTAND）
@@ -107,16 +109,25 @@ num_priv_latent: 29  # 隐式 privilige latent（由历史编码得到）
 
 # 添加相机配置段
 use_camera: true
+depth_input_source: "ros"
+depth_ros_topic: "/rgbd_d435/depth_image"
+depth_rgb_topic: "/rgbd_d435/image"
+depth_dds_domain: 1
+depth_dds_interface: "lo"
+depth_dds_topic: "rt/depthimage"
+depth_dds_normalized: true
 depth_width: 87
 depth_height: 58
-# max_depth: 3.0     # ← 实机用 3.0（Onboard Python 一致，给更多反应距离）
-max_depth: 2.0       # ← MuJoCo/Gazebo 仿真用 2.0（与训练 far_clip=2 一致）
+max_depth: 3.0
 depth_buffer_len: 1  # 深度历史帧数；traced 中 buffer_len=2（训练），实机推理多为单帧
 depth_feature_dim: 32   # 与 vision_jit.pt 输出 latent 长度一致（额外 2 维偏航在代码中单独处理）
+depth_rnn_hidden_size: 512
 use_depth_cnn: true  # 若使用预训练CNN设为true
 # 必须使用 vision_stateful_jit.pt（GRU hidden 作为显式输入/输出，保持时序记忆）
 # 旧版 vision_jit.pt 的 GRU hidden state 在 trace 时丢失，每次调用都从零开始（无时序记忆）
-depth_cnn_model: "vision_stateful_jit.pt"
+depth_cnn_model: "student-005-noesm-700-vision_stateful_jit.pt"
+# depth_cnn_model: "vision_stateful_jit.pt"
+# depth_cnn_model: "baseline_student-26500-vision_stateful_jit.pt"
 # 深度网络输出 yaw_from_depth 的裁剪绝对值上限（弧度），越小越保守
 # Onboard Python 不做任何裁剪；设很大值(100)等价于不裁剪，与 Onboard 对齐
 depth_yaw_clip: 100.0
@@ -144,7 +155,7 @@ depth_crop_right: 24
 # depth_crop_bottom: 8
 # depth_crop_left: 18
 # depth_crop_right: 18
-depth_update_interval: 5
+depth_update_interval: 2
 # 动作平滑：EMA 系数，filtered = alpha*last + (1-alpha)*current。0=无平滑易晃；0.2~0.3 轻度平滑、0.4~0.5 仿真减抖、0.65~0.75 实机更稳
 # Gazebo 物理 1000Hz 比训练 200Hz 更灵敏，适当平滑减少关节抖动
 action_filter_alpha: 0.0
